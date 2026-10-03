@@ -1,0 +1,71 @@
+/**
+ * Thin fetch wrapper around the Flask JSON API (replaces the old Electron
+ * IPC bridge -- see routes/*.py). The browser never holds an API key, only
+ * what these calls return (account metadata without keys, signed URLs,
+ * agent metadata).
+ */
+(function () {
+  async function request(path, options) {
+    options = options || {};
+    const res = await fetch(path, {
+      method: options.method || "GET",
+      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body.error || `Request to ${path} failed with HTTP ${res.status}`);
+    }
+    return body;
+  }
+
+  const api = {
+    accounts: {
+      list: () => request("/api/accounts"),
+      test: (accountId) => request(`/api/accounts/${encodeURIComponent(accountId)}/test`, { method: "POST" }),
+    },
+    agents: {
+      listRemote: (accountId) => request(`/api/agents/${encodeURIComponent(accountId)}/remote`),
+      inspect: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/inspect`),
+      listLlms: (accountId) => request(`/api/agents/${encodeURIComponent(accountId)}/llms`),
+      getModelConfig: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/model-config`),
+      setModelConfig: (accountId, agentId, cfg) =>
+        request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/model-config`, { method: "POST", body: cfg }),
+      getPendingRestore: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/pending-restore`),
+      savePendingRestore: (accountId, agentId, snapshot) =>
+        request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/pending-restore`, { method: "POST", body: snapshot }),
+      clearPendingRestore: (accountId, agentId) =>
+        request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/pending-restore`, { method: "DELETE" }),
+    },
+    session: {
+      getSignedUrl: (accountId, agentId) =>
+        request(`/api/session/signed-url?account_id=${encodeURIComponent(accountId)}&agent_id=${encodeURIComponent(agentId)}`),
+      fetchFinalTranscript: (accountId, conversationId) =>
+        request(`/api/session/final-transcript?account_id=${encodeURIComponent(accountId)}&conversation_id=${encodeURIComponent(conversationId)}`),
+    },
+    config: {
+      load: () => request("/api/config"),
+      save: (cfg) => request("/api/config", { method: "POST", body: cfg }),
+    },
+    exports: {
+      save: (name, data) => request("/api/exports", { method: "POST", body: { name, data } }),
+      list: () => request("/api/exports"),
+      read: (path) => request(`/api/exports/read?path=${encodeURIComponent(path)}`),
+      clear: () => request("/api/exports", { method: "DELETE" }),
+    },
+    benchmarkRuns: {
+      list: (benchmarkId) => request(`/api/benchmark-runs${benchmarkId ? `?benchmark_id=${encodeURIComponent(benchmarkId)}` : ""}`),
+      save: (run) => request("/api/benchmark-runs", { method: "POST", body: run }),
+      update: (runId, patch) => request(`/api/benchmark-runs/${encodeURIComponent(runId)}`, { method: "PATCH", body: patch }),
+      remove: (runId) => request(`/api/benchmark-runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
+      clear: () => request("/api/benchmark-runs", { method: "DELETE" }),
+    },
+    debugLogs: {
+      save: (data) => request("/api/debug-logs", { method: "POST", body: data }),
+      list: () => request("/api/debug-logs"),
+      read: (path) => request(`/api/debug-logs/read?path=${encodeURIComponent(path)}`),
+    },
+  };
+
+  window.AB.api = api;
+})();

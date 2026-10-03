@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Bridge</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- CDN-loaded runtime (no Node build step -- see README "why a CDN"). -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.6/babel.min.js" crossorigin="anonymous"></script>
+
+    <!-- Namespace bootstrap -- must load first. -->
+    <script src="{{ url_for('static', filename='js/bootstrap.js') }}"></script>
+
+    <!-- Plain logic modules (no JSX -> no Babel needed, classic <script> tags, global scope shared across files). -->
+    <script src="{{ url_for('static', filename='js/audio/pcm.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/audio/Pacer.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/audio/Player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/audio/mic.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/model/factory.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/metrics.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/api.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/scenario/languageCatalog.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/scenario/dynamicVariables.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/scenario/promptBuilder.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/scenario/examplePresets.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/AgentSession.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/TranscriptStore.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/Preflight.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/Bridge.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/BenchmarkRunner.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/RunHistory.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session/GlobalAnalytics.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/hooks/useAppConfig.js') }}"></script>
+
+    <!-- JSX UI components, transpiled in-browser by Babel standalone (dependency order matters). -->
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/Tabs.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/AgentColumn.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/CenterTranscript.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/Timeline.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/DebugPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/PreflightChecklist.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/BatchPreflightChecklist.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/BatchSession.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/BenchmarkAnalyticsViews.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/BenchmarkSession.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/AnalyticsPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/DynamicVariablesEditor.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/AccountsPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/AgentsPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/ScenarioEditor.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/ScenariosPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/PresetsPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/BenchmarksPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/settings/AudioPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/SettingsScreen.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/HistoryPanel.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/SessionScreen.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/ui/App.jsx') }}"></script>
+    <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='js/main.jsx') }}"></script>
+  </body>
+</html>

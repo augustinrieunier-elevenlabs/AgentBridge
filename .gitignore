@@ -1,0 +1,22 @@
+.env
+*.local
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Flask instance folder: config.json, exports/*.json, benchmark_runs.json,
+# debug_logs/*.json, benchmark_pending_restores.json (no secrets, but local state)
+instance/
+
+# Old Electron/TypeScript prototype, kept for reference only
+_legacy-electron-version/node_modules/
+_legacy-electron-version/dist-electron/
+_legacy-electron-version/renderer-dist/
+
+.DS_Store
+.vscode/
+.idea/

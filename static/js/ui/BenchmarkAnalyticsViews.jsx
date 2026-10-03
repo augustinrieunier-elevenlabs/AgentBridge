@@ -1,0 +1,479 @@
+/**
+ * Shared presentational components for a latency-analysis `result`: { variants: [...] }, each
+ * variant shaped { variantId, label, asr, perNode, scenarioRuns }. See session/BenchmarkRunner.js
+ * for how a Benchmark run builds this, and session/GlobalAnalytics.js for how the cross-feature
+ * Analytics view (History → Analytics) builds the same shape by harmonizing session/batch/benchmark
+ * history by (llm, tts) config instead of by benchmark-defined variant. Both consumers
+ * (ui/BenchmarkSession.jsx and ui/AnalyticsPanel.jsx) render the exact same tables/chart from here
+ * so the two views read identically regardless of which feature produced the underlying data.
+ */
+(function () {
+  const { combineNodeStats } = window.AB.session.BenchmarkRunner;
+
+  function formatMs(valueSec) {
+    return valueSec == null ? "—" : `${Math.round(valueSec * 1000)} ms`;
+  }
+
+  // Matches --ok/--warn/--fail from styles.css, for a continuous coverage-ratio gradient (see
+  // NodeCoverageMatrix's Total row) where the binary badge-ok/badge-warn classes aren't granular
+  // enough to tell "almost full coverage" apart from "barely any" across many variant columns.
+  const OK_RGB = [61, 220, 132];
+  const WARN_RGB = [255, 176, 32];
+  const FAIL_RGB = [255, 92, 92];
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function lerpColor(c1, c2, t) {
+    return `rgb(${Math.round(lerp(c1[0], c2[0], t))}, ${Math.round(lerp(c1[1], c2[1], t))}, ${Math.round(lerp(c1[2], c2[2], t))})`;
+  }
+
+  /** ratio = visitedCount/totalNodes, 1 = every node visited (green) down to 0 (red), amber midway. */
+  function coverageColor(ratio) {
+    if (ratio >= 1) return `rgb(${OK_RGB.join(", ")})`;
+    if (ratio >= 0.5) return lerpColor(WARN_RGB, OK_RGB, (ratio - 0.5) / 0.5);
+    return lerpColor(FAIL_RGB, WARN_RGB, ratio / 0.5);
+  }
+
+  /** Simple stat cell for a value that's always expected to exist (e.g. the global ASR row, where
+   * every variant always has caller turns) -- no "was this even reached" ambiguity to resolve. */
+  function StatCell({ stat }) {
+    if (!stat) return <span className="muted small">n/a</span>;
+    return (
+      <span title={`${stat.n} sample${stat.n === 1 ? "" : "s"}`}>
+        {formatMs(stat.avg)} <span className="muted small">({formatMs(stat.min)}–{formatMs(stat.max)})</span>
+      </span>
+    );
+  }
+
+  /**
+   * Per-node stat cell. A node can be missing data for two very different reasons that used to
+   * render identically as a blank cell: the variant's calls never routed through this node at all
+   * (e.g. a weaker LLM took a different branch than another variant for the same scenario -- a real
+   * finding, not a bug), or the node WAS visited but the platform hadn't finished finalizing
+   * conversation_turn_metrics for that turn yet (see BenchmarkRunner.js refreshRunStats / the
+   * Session "Refresh stats" button). `nodeStats` is undefined for the first case and an object
+   * (possibly with a null `stat`) for the second -- see extractMetricsFromConversation's turnCount.
+   */
+  function NodeStatCell({ stat, nodeStats }) {
+    if (!nodeStats) {
+      return (
+        <span className="muted small" title="None of this variant's calls routed through this node.">
+          not visited
+        </span>
+      );
+    }
+    if (!stat) {
+      return (
+        <span
+          className="muted small"
+          title={`Visited ${nodeStats.turnCount || "some"} time${nodeStats.turnCount === 1 ? "" : "s"}, but no timing landed here for this metric -- may be normal (e.g. no retrieval happened), or try "Refresh stats" if the run just finished.`}
+        >
+          n/a
+        </span>
+      );
+    }
+    return <StatCell stat={stat} />;
+  }
+
+  /** All-nodes-combined min/max/avg per variant for ASR/LLM/TTS. Derived from `v.perNode` at
+   * display time (combineNodeStats), not from a stored field -- so this is correct immediately for
+   * every run, including ones saved before this table existed, with no "Refresh stats" needed. A
+   * node a variant never visited simply isn't in `perNode` and correctly contributes nothing. */
+  function GlobalStatsTable({ result, showAsr = true }) {
+    return (
+      <div className="card">
+        <strong>Global stats -- all nodes combined</strong>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Variant</th>
+              {showAsr && <th>ASR (avg / min–max)</th>}
+              <th>LLM (avg / min–max)</th>
+              <th>TTS (avg / min–max)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.variants.map((v) => (
+              <tr key={v.variantId}>
+                <td>{v.label}</td>
+                {showAsr && (
+                  <td>
+                    <StatCell stat={v.asr} />
+                  </td>
+                )}
+                <td>
+                  <StatCell stat={combineNodeStats(v.perNode, "llm")} />
+                </td>
+                <td>
+                  <StatCell stat={combineNodeStats(v.perNode, "tts")} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  // A node's turnCount well below what another variant achieved in the SAME node is the second
+  // divergence signal (see LOW_TURN_COUNT_RATIO below): a variant can be attributed a node at all
+  // (passes the presence check) and still have gotten far less done there before stalling -- exactly
+  // what a deadlock_timeout mid-node looks like. Calibrated against a real run (2026-10-03): 6
+  // variants that deadlocked mid-node showed turnCount 4-6 there, against 10 for the one variant
+  // that completed the same node normally.
+  //
+  // Gated on NORMAL_END_REASONS, not applied unconditionally: a benchmark with several DIFFERENT
+  // scenarios naturally produces real, legitimate turnCount variance per node between variants
+  // (different scenarios ask different questions, routing different numbers of times through a
+  // given node) -- checked against a second real run with 3 distinct scenarios, all of which closed
+  // normally, and the unconditional ratio check flagged over a dozen cells that were just ordinary
+  // variance, not stalls. Restricting the flag to variants that had at least one scenario end
+  // abnormally ties it to an observed problem instead of inferring one from statistics alone, and
+  // eliminated every false positive in that comparison.
+  const LOW_TURN_COUNT_RATIO = 0.7;
+  const NORMAL_END_REASONS = new Set(["caller_websocket_closed", "callee_websocket_closed"]);
+
+  /**
+   * For the same scenarios, every variant should in principle route through the same workflow
+   * nodes -- the caller follows the same script either way. Two different ways a variant can
+   * diverge from that, both independent of (and often more informative than) the latency numbers
+   * above:
+   *   - a node another variant visited that this one never reaches at all (✗) -- a routing/behavior
+   *     change from the model/TTS swap, not a timing gap (see NodeStatCell's "not visited" vs "n/a").
+   *   - for a variant that had a scenario end abnormally (deadlock_timeout, max_duration_reached, a
+   *     failed start -- anything other than a clean websocket close): a node it DOES reach, but with
+   *     notably fewer turns than another variant achieved there (⚠) -- a likely clue to WHERE it
+   *     stalled, not just THAT it did.
+   * Rows = nodes, columns = variants, so either kind of divergence reads as a single flagged cell in
+   * an otherwise-clean column rather than being buried in six separate per-node tables below.
+   */
+  const COVERAGE_SORT_OPTIONS = [
+    { value: "label", label: "A→Z" },
+    { value: "coverage-desc", label: "Coverage ↓" },
+    { value: "coverage-asc", label: "Coverage ↑" },
+  ];
+  // Beyond this many columns a single table gets wider than it's useful (a 20+-variant benchmark
+  // scrolls off-screen and loses the "scan a row" readability this matrix is for) -- wrap into
+  // several same-width tables instead, each capped at this many variant columns.
+  const MAX_COVERAGE_COLUMNS = 7;
+  // Fixed per-column widths (see .coverage-table in styles.css) so every chunk's Node column and
+  // variant columns line up at the exact same width, instead of each chunk's table sizing its own
+  // columns off its own content/column count.
+  const COVERAGE_NODE_COL_PX = 220;
+  const COVERAGE_VARIANT_COL_PX = 160;
+
+  function NodeCoverageMatrix({ result }) {
+    const { useState } = React;
+    const [sortOrder, setSortOrder] = useState("label");
+
+    const allNodeIds = Array.from(new Set(result.variants.flatMap((v) => Object.keys(v.perNode)))).sort();
+    if (allNodeIds.length === 0) return null;
+
+    const maxTurnCountByNode = {};
+    for (const nodeId of allNodeIds) {
+      maxTurnCountByNode[nodeId] = Math.max(...result.variants.map((v) => (v.perNode[nodeId] && v.perNode[nodeId].turnCount) || 0));
+    }
+
+    const hadAbnormalEnd = (v) => (v.scenarioRuns || []).some((r) => !NORMAL_END_REASONS.has(r.endReason));
+    const isThin = (v, nodeId) => {
+      const stats = v.perNode[nodeId];
+      const maxForNode = maxTurnCountByNode[nodeId];
+      return Boolean(stats) && hadAbnormalEnd(v) && maxForNode > 1 && stats.turnCount / maxForNode < LOW_TURN_COUNT_RATIO;
+    };
+
+    const coverageByVariantId = new Map(
+      result.variants.map((v) => {
+        const visitedCount = allNodeIds.filter((id) => v.perNode[id]).length;
+        const lowTurnCount = allNodeIds.filter((id) => isThin(v, id)).length;
+        return [v.variantId, { visitedCount, lowTurnCount, clean: visitedCount === allNodeIds.length && lowTurnCount === 0 }];
+      }),
+    );
+
+    const sortedVariants = [...result.variants].sort((a, b) => {
+      if (sortOrder === "label") return a.label.localeCompare(b.label);
+      const diff = coverageByVariantId.get(a.variantId).visitedCount - coverageByVariantId.get(b.variantId).visitedCount;
+      return sortOrder === "coverage-asc" ? diff : -diff;
+    });
+    const coverage = sortedVariants.map((v) => ({ variantId: v.variantId, label: v.label, ...coverageByVariantId.get(v.variantId) }));
+    const anyMismatch = coverage.some((c) => !c.clean);
+
+    const chunks = [];
+    for (let i = 0; i < sortedVariants.length; i += MAX_COVERAGE_COLUMNS) {
+      chunks.push({ variants: sortedVariants.slice(i, i + MAX_COVERAGE_COLUMNS), coverage: coverage.slice(i, i + MAX_COVERAGE_COLUMNS) });
+    }
+
+    return (
+      <div className="card">
+        <div className="card-row">
+          <strong>Node coverage -- did every variant reach the same nodes, the same number of times?</strong>
+          <div className="stacked-chart-sort">
+            {COVERAGE_SORT_OPTIONS.map((opt) => (
+              <button key={opt.value} className={sortOrder === opt.value ? "active" : ""} onClick={() => setSortOrder(opt.value)}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="panel-help">
+          Every variant runs the same scenarios, so it should visit the same nodes about as many times. ✗ means that variant's calls never routed through this node at all -- a routing/behavior
+          change from the model/TTS swap, not a timing gap. ⚠ (only shown for a variant that had a scenario end abnormally) means it DID reach the node but did notably less there than another
+          variant managed before stopping -- hover a cell for the exact turn counts; often a clue to where it stalled. Either way, treat that variant as less reliable for this agent and worth a
+          closer manual look, regardless of how its latency numbers compare.
+        </p>
+        {!anyMismatch && <p className="panel-help">✅ Full parity -- every variant visited every node that any variant visited, with no sign of stalling partway through one.</p>}
+        {chunks.map((chunk, chunkIdx) => (
+          <div key={chunkIdx} style={{ overflowX: "auto", marginTop: chunkIdx > 0 ? "12px" : 0 }}>
+            <table className="table coverage-table">
+              <colgroup>
+                <col style={{ width: COVERAGE_NODE_COL_PX }} />
+                {chunk.coverage.map((c) => (
+                  <col key={c.variantId} style={{ width: COVERAGE_VARIANT_COL_PX }} />
+                ))}
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Node</th>
+                  {chunk.coverage.map((c) => (
+                    <th key={c.variantId} title={c.label}>
+                      {c.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {allNodeIds.map((nodeId) => {
+                  const maxForNode = maxTurnCountByNode[nodeId];
+                  return (
+                    <tr key={nodeId}>
+                      <td>{nodeId}</td>
+                      {chunk.variants.map((v) => {
+                        const stats = v.perNode[nodeId];
+                        if (!stats) {
+                          return (
+                            <td key={v.variantId}>
+                              <span className="badge badge-fail" title="Never visited">
+                                ✗
+                              </span>
+                            </td>
+                          );
+                        }
+                        const low = isThin(v, nodeId);
+                        return (
+                          <td key={v.variantId}>
+                            <span
+                              className={`badge ${low ? "badge-warn" : "badge-ok"}`}
+                              title={low ? `${stats.turnCount} turn${stats.turnCount === 1 ? "" : "s"} here, vs up to ${maxForNode} elsewhere` : `${stats.turnCount} turn${stats.turnCount === 1 ? "" : "s"}`}
+                            >
+                              {low ? "⚠" : "✓"}
+                            </span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+                <tr>
+                  <td>
+                    <strong>Total</strong>
+                  </td>
+                  {chunk.coverage.map((c) => {
+                    const ratio = c.visitedCount / allNodeIds.length;
+                    return (
+                      <td key={c.variantId}>
+                        <span
+                          className="badge"
+                          style={{ background: coverageColor(ratio), color: "#1a1a1a" }}
+                          title={`${Math.round(ratio * 100)}% of nodes visited`}
+                        >
+                          {c.visitedCount}/{allNodeIds.length} visited{c.lowTurnCount > 0 ? `, ${c.lowTurnCount} thin` : ""}
+                        </span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // ASR uses --operator (violet), freed up now that LLM is gradient-colored by node coverage
+  // instead of a fixed swatch -- keeps every segment visually distinct (TTS blue, ASR violet, LLM
+  // green/amber/red), where ASR previously used an orange that could be confused for the LLM
+  // segment's warn/fail range.
+  const CHART_SERIES = [
+    { key: "asr", label: "ASR", cssVar: "--operator" },
+    { key: "llm", label: "LLM", cssVar: null },
+    { key: "tts", label: "TTS", cssVar: "--callee" },
+  ];
+  const CHART_AXIS_FRACTIONS = [0, 0.25, 0.5, 0.75, 1];
+
+  /** Horizontal stacked bar chart of average ASR + LLM + TTS (not RAG -- the spec excludes it
+   * here, since stacking it alongside the others would double-count: a RAG lookup happens as part
+   * of an LLM turn, not as a separate step in the round trip). One row per variant -- horizontal
+   * reads much better than vertical columns once labels get as long as "V3 Conversational +
+   * qwen35-397b-a17b": the label sits beside its own full-width row instead of squeezed under a
+   * narrow column. X axis = duration, Y axis = the TTS/LLM variant pairs, with a 5-tick scale
+   * (0/25/50/75/100% of the longest total) under the bars. Plain CSS grid/flex, no charting
+   * library, consistent with this app's no-build-step/CDN-only dependency policy. */
+  const SORT_OPTIONS = [
+    { value: "none", label: "As run" },
+    { value: "asc", label: "↑ Ascending" },
+    { value: "desc", label: "↓ Descending" },
+  ];
+
+  function StackedLatencyChart({ result, showAsr = true }) {
+    const { useState } = React;
+    const [sortOrder, setSortOrder] = useState("none");
+
+    // ASR is excluded (not just hidden) from the "pure LLM performance" view (AnalyticsPanel's
+    // breakdown-by-TTS toggle off) -- otherwise a bar's displayed total/sort order would silently
+    // include a number no longer shown anywhere on it.
+    const series = showAsr ? CHART_SERIES : CHART_SERIES.filter((s) => s.key !== "asr");
+
+    // Same coverage ratio as NodeCoverageMatrix's Total row, so the LLM segment's color means the
+    // same thing in both places: how much of this agent's workflow this variant actually exercised.
+    const allNodeIds = Array.from(new Set(result.variants.flatMap((v) => Object.keys(v.perNode))));
+    const bars = result.variants.map((v) => {
+      const llm = combineNodeStats(v.perNode, "llm");
+      const tts = combineNodeStats(v.perNode, "tts");
+      const values = { asr: (v.asr && v.asr.avg) || 0, llm: (llm && llm.avg) || 0, tts: (tts && tts.avg) || 0 };
+      const total = series.reduce((sum, s) => sum + values[s.key], 0);
+      const coverageRatio = allNodeIds.length > 0 ? allNodeIds.filter((id) => v.perNode[id]).length / allNodeIds.length : 1;
+      return { key: v.variantId, label: v.label, ...values, total, coverageRatio };
+    });
+    if (sortOrder !== "none") {
+      bars.sort((a, b) => (sortOrder === "asc" ? a.total - b.total : b.total - a.total));
+    }
+    const maxTotal = Math.max(1e-9, ...bars.map((b) => b.total));
+    const axisTicks = CHART_AXIS_FRACTIONS.map((f) => f * maxTotal);
+
+    return (
+      <div className="card">
+        <div className="card-row">
+          <strong>Average latency per variant -- {series.map((s) => s.label).join(" + ")} stacked (all nodes combined)</strong>
+          <div className="stacked-chart-sort">
+            {SORT_OPTIONS.map((opt) => (
+              <button key={opt.value} className={sortOrder === opt.value ? "active" : ""} onClick={() => setSortOrder(opt.value)}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="stacked-chart-legend">
+          {series.map((s) => {
+            const isLlm = s.key === "llm";
+            const background = isLlm ? `linear-gradient(90deg, rgb(${FAIL_RGB.join(", ")}), rgb(${WARN_RGB.join(", ")}), rgb(${OK_RGB.join(", ")}))` : `var(${s.cssVar})`;
+            return (
+              <span key={s.key} className="stacked-chart-legend-item">
+                <span className="stacked-chart-swatch" style={{ background }} />
+                {s.label}
+                {isLlm && <span className="muted small"> (node coverage: green = all nodes, red = fewest)</span>}
+              </span>
+            );
+          })}
+        </div>
+        <div className="stacked-chart-h">
+          {bars.map((b) => (
+            <React.Fragment key={b.key}>
+              <div className="stacked-chart-h-label small">{b.label}</div>
+              <div className="stacked-chart-h-track">
+                {series.map((s) => {
+                  const value = b[s.key];
+                  const width = (value / maxTotal) * 100;
+                  const isLlm = s.key === "llm";
+                  const background = isLlm ? coverageColor(b.coverageRatio) : `var(${s.cssVar})`;
+                  const title = isLlm ? `${s.label}: ${formatMs(value)} -- ${Math.round(b.coverageRatio * 100)}% of nodes visited` : `${s.label}: ${formatMs(value)}`;
+                  return <div key={s.key} className="stacked-chart-h-segment" title={title} style={{ width: `${width}%`, background }} />;
+                })}
+                <span className="stacked-chart-h-total small muted" style={{ left: `calc(${(b.total / maxTotal) * 100}% + 6px)` }}>
+                  {formatMs(b.total)}
+                </span>
+              </div>
+            </React.Fragment>
+          ))}
+          <div />
+          <div className="stacked-chart-h-axis">
+            {axisTicks.map((t, i) => (
+              <span key={i} className="small muted">
+                {formatMs(t)}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function ResultsTables({ result }) {
+    const nodeIds = Array.from(new Set(result.variants.flatMap((v) => Object.keys(v.perNode)))).sort();
+    return (
+      <div>
+        <div className="card">
+          <strong>ASR time -- global, across all of the caller's turns</strong>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Variant</th>
+                <th>ASR (avg / min–max)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.variants.map((v) => (
+                <tr key={v.variantId}>
+                  <td>{v.label}</td>
+                  <td>
+                    <StatCell stat={v.asr} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {nodeIds.length === 0 && <p className="panel-help">No per-node data found in the collected conversations -- the workflow may not have reported node ids for these turns.</p>}
+
+        {nodeIds.map((nodeId) => (
+          <div key={nodeId} className="card">
+            <strong>Node: {nodeId}</strong>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Variant</th>
+                  <th>LLM (avg / min–max)</th>
+                  <th>TTS (avg / min–max)</th>
+                  <th>RAG (avg / min–max)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.variants.map((v) => {
+                  const nodeStats = v.perNode[nodeId];
+                  return (
+                    <tr key={v.variantId}>
+                      <td>{v.label}</td>
+                      <td>
+                        <NodeStatCell stat={nodeStats && nodeStats.llm} nodeStats={nodeStats} />
+                      </td>
+                      <td>
+                        <NodeStatCell stat={nodeStats && nodeStats.tts} nodeStats={nodeStats} />
+                      </td>
+                      <td>
+                        <NodeStatCell stat={nodeStats && nodeStats.rag} nodeStats={nodeStats} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  window.AB.ui.benchmarkViews = { formatMs, StatCell, NodeStatCell, GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart, ResultsTables };
+})();
