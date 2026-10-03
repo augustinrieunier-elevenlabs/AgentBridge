@@ -13,9 +13,7 @@ htmlcov/
 instance/
 
 # Old Electron/TypeScript prototype, kept for reference only
-_legacy-electron-version/node_modules/
-_legacy-electron-version/dist-electron/
-_legacy-electron-version/renderer-dist/
+_legacy-electron-version/*
 
 .DS_Store
 .vscode/
