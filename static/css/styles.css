@@ -333,6 +333,21 @@ label.grow {
   flex-wrap: wrap;
 }
 
+.collapsible-title {
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapsible-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  margin-right: 2px;
+}
+
+.collapsible-caret.open {
+  transform: rotate(90deg);
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -656,6 +671,29 @@ label.grow {
 .banner-warn {
   background: rgba(255, 176, 32, 0.15);
   color: var(--warn);
+}
+
+.banner-ok {
+  background: rgba(61, 220, 132, 0.15);
+  color: var(--ok);
+}
+
+.recommendation-node-block {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.recommendation-node-block:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.recommendation-top-row {
+  background: rgba(61, 220, 132, 0.08);
+}
+
+.ranking-table-more {
+  margin-top: 6px;
 }
 
 .debug-panel {

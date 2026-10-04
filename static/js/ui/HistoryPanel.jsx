@@ -8,11 +8,14 @@
  * place regardless of which store it actually lives in. The detail view is deliberately just the
  * raw JSON for now -- it's the full per-run data (including every conversation id) a future
  * analytics pass would read from, not yet a purpose-built UI for it.
+ *
+ * The cross-feature Analytics view used to live as a sub-tab here; it's now its own top-level app
+ * tab (see ui/App.jsx) since it's a distinct destination in its own right, not really "part of"
+ * History -- it reads from the same two stores, but answers a different question (latency/coverage
+ * across stored runs) than this raw run-by-run list does.
  */
 (function () {
   const { useEffect, useState } = React;
-  const Tabs = window.AB.ui.Tabs;
-  const AnalyticsPanel = window.AB.ui.AnalyticsPanel;
 
   const TYPE_LABELS = { session: "Session", batch: "Batch preset", benchmark: "Benchmark" };
 
@@ -20,7 +23,7 @@
     return TYPE_LABELS[type] || type || "Unknown";
   }
 
-  function HistoryList() {
+  function HistoryPanel() {
     const [entries, setEntries] = useState([]);
     const [selectedKey, setSelectedKey] = useState(null);
     const [selected, setSelected] = useState(null);
@@ -101,25 +104,6 @@
           {entries.length === 0 && <p className="empty-state">No run yet. Every session, batch preset, and benchmark run is saved here automatically as soon as it ends.</p>}
         </div>
         <div className="panel-detail">{selected ? <pre className="prompt-preview">{JSON.stringify(selected, null, 2)}</pre> : <p className="empty-state">Select a run to inspect it.</p>}</div>
-      </div>
-    );
-  }
-
-  function HistoryPanel({ config }) {
-    const [sub, setSub] = useState("list");
-
-    return (
-      <div>
-        <Tabs
-          value={sub}
-          onChange={setSub}
-          options={[
-            { value: "list", label: "List" },
-            { value: "analytics", label: "Analytics" },
-          ]}
-        />
-        {sub === "list" && <HistoryList />}
-        {sub === "analytics" && <AnalyticsPanel config={config} />}
       </div>
     );
   }

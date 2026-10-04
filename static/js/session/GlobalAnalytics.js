@@ -21,7 +21,8 @@
  * demo-scale history; worth revisiting (persist once per conversation) only if this gets slow.
  */
 (function () {
-  const { fetchConversationWithMetrics, extractMetricsFromConversation, mergeExtracts, summarizeNodeStats, computeMinMaxAvg } = window.AB.session.BenchmarkRunner;
+  const { fetchConversationWithMetrics, extractMetricsFromConversation, mergeExtracts, summarizeNodeStats, computeMinMaxAvg, combineNodeStats, NORMAL_END_REASONS } =
+    window.AB.session.BenchmarkRunner;
 
   function configKey(cfg) {
     if (!cfg) return "unknown";
@@ -42,7 +43,9 @@
 
   /** Gathers every (conversation entry, config) pair across exports (sessions/batches) and
    * benchmark runs that belong to `calleeAgent`, already filtered by `scenarioIds` (empty/omitted =
-   * no filter, keep every scenario). */
+   * no filter, keep every scenario). Also returns the raw matching export/benchmark records
+   * themselves (not just the entries bucketed out of them) -- resolveNodeNames needs those to read
+   * and backfill their `nodeNames` field, which lives at the whole-record level, not per entry. */
   async function gatherEntries({ api, calleeAgent, scenarioIds }) {
     const scenarioFilter = scenarioIds && scenarioIds.length > 0 ? new Set(scenarioIds) : null;
     const matchesScenario = (entry) => !scenarioFilter || scenarioFilter.has(entry.scenarioId);
@@ -55,7 +58,8 @@
     const exportSummaries = await api.exports.list();
     const relevantExports = exportSummaries.filter((e) => sameAgent(e.callee, calleeAgent));
     const fullExports = await Promise.all(relevantExports.map((e) => api.exports.read(e.path)));
-    for (const exp of fullExports) {
+    const exportRecords = relevantExports.map((e, i) => ({ path: e.path, record: fullExports[i] }));
+    for (const { record: exp } of exportRecords) {
       const cfg = exp.calleeConfig || null;
       for (const entry of exp.conversations || []) {
         if (!matchesScenario(entry)) continue;
@@ -66,11 +70,12 @@
     // Benchmarks: each VARIANT carries its own config, independent of the run's other variants --
     // bucket per variant, not per whole run. Falls back to label matching for a run saved before
     // calleeAccountId/calleeAgentId existed on the record.
-    const benchmarkRuns = await api.benchmarkRuns.list();
-    for (const run of benchmarkRuns) {
+    const allBenchmarkRuns = await api.benchmarkRuns.list();
+    const benchmarkRecords = allBenchmarkRuns.filter((run) => {
       const runAgent = run.calleeAccountId ? { accountId: run.calleeAccountId, agentId: run.calleeAgentId } : null;
-      const matchesRun = runAgent ? sameAgent(runAgent, calleeAgent) : run.calleeAgentLabel === calleeAgent.label;
-      if (!matchesRun) continue;
+      return runAgent ? sameAgent(runAgent, calleeAgent) : run.calleeAgentLabel === calleeAgent.label;
+    });
+    for (const run of benchmarkRecords) {
       const snapshot = run.snapshot || {};
       for (const variant of run.variants || []) {
         // A benchmark that only varies ONE axis deliberately leaves the other null on its variants
@@ -92,7 +97,56 @@
       }
     }
 
-    return bucketed;
+    return { bucketed, exportRecords, benchmarkRecords };
+  }
+
+  /**
+   * Resolves the Workflow node id -> {label, type} map for this callee agent, reusing whatever's
+   * already cached on ANY of its gathered session/batch/benchmark records before ever calling the
+   * live API -- a run saved after this feature shipped already carries its own `nodeNames` (see
+   * RunHistory.js / BenchmarkRunner.js runBenchmark). Only calls GET .../workflow-nodes when NONE of
+   * them have it yet (the first time this agent's EXISTING history is analyzed after this feature
+   * shipped), and when it does, writes the result back into every record that was missing it, via
+   * PATCH, so that live call never has to happen again for this agent's history. Confirmed with the
+   * user 2026-10-05: "si il n'y a rien dans les fichiers ... tu fais un call aux api ... puis tu
+   * modifie tous les fichier concernés pour ne pas avoir à refaire cet appel la prochaine fois".
+   */
+  async function resolveNodeNames({ api, calleeAgent, exportRecords, benchmarkRecords }) {
+    let nodeNames = null;
+    for (const { record } of exportRecords) {
+      if (record.nodeNames) {
+        nodeNames = record.nodeNames;
+        break;
+      }
+    }
+    if (!nodeNames) {
+      for (const run of benchmarkRecords) {
+        if (run.nodeNames) {
+          nodeNames = run.nodeNames;
+          break;
+        }
+      }
+    }
+
+    if (!nodeNames) {
+      try {
+        nodeNames = await api.agents.getWorkflowNodes(calleeAgent.accountId, calleeAgent.agentId);
+      } catch (err) {
+        console.error("Could not resolve workflow node names for global analytics", err);
+        return {};
+      }
+    }
+
+    const backfills = [];
+    for (const { path, record } of exportRecords) {
+      if (!record.nodeNames) backfills.push(api.exports.update(path, { nodeNames }).catch((err) => console.error("Could not backfill node names into export", path, err)));
+    }
+    for (const run of benchmarkRecords) {
+      if (!run.nodeNames) backfills.push(api.benchmarkRuns.update(run.id, { nodeNames }).catch((err) => console.error("Could not backfill node names into benchmark run", run.id, err)));
+    }
+    await Promise.all(backfills);
+
+    return nodeNames;
   }
 
   /**
@@ -100,8 +154,10 @@
    * fetched+extracted (there can be many, one live API call each).
    */
   async function computeGlobalAnalytics({ api, calleeAgent, scenarioIds, onProgress }) {
-    const bucketed = await gatherEntries({ api, calleeAgent, scenarioIds });
-    if (bucketed.length === 0) return { variants: [] };
+    const { bucketed, exportRecords, benchmarkRecords } = await gatherEntries({ api, calleeAgent, scenarioIds });
+    if (bucketed.length === 0) return { variants: [], nodeNames: {} };
+
+    const nodeNames = await resolveNodeNames({ api, calleeAgent, exportRecords, benchmarkRecords });
 
     const byConfig = new Map(); // key -> { label, cfg, entries: [] }
     for (const b of bucketed) {
@@ -147,7 +203,7 @@
     // "Unknown config" last, so the attributable/comparable configs lead the table.
     variants.sort((a, b) => (a.variantId === "unknown" ? 1 : b.variantId === "unknown" ? -1 : a.label.localeCompare(b.label)));
 
-    return { variants };
+    return { variants, nodeNames };
   }
 
   /** Pools a {min,max,avg,n} summary pair into one -- avg*n recovers each side's sum exactly, so
@@ -212,5 +268,137 @@
     return { variants: [...grouped, ...passthrough] };
   }
 
-  window.AB.session.GlobalAnalytics = { computeGlobalAnalytics, groupVariantsByLlm };
+  function groupBy(list, keyFn) {
+    const map = new Map();
+    for (const item of list) {
+      const key = keyFn(item);
+      if (key == null) continue; // no real (non-default) value to group under -- nothing to recommend
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(item);
+    }
+    return map;
+  }
+
+  /** Fraction of scenario runs that ended via a normal websocket close, not a stall/timeout/failed
+   * start -- a "the call didn't crash" signal, nothing more. Deliberately NOT called "success rate"
+   * anywhere in this module or the UI: a run can hang up perfectly cleanly after visiting only HALF
+   * the agent's workflow (e.g. none of the tested scenarios ever asked a question routing through
+   * some node), which the person using this app rightly flagged as misleading when hangupRate alone
+   * was labeled "success rate" right next to a node-coverage table showing exactly that gap
+   * (confirmed with the user 2026-10-05: the two numbers "se contredisent"). See reliabilityOf,
+   * which folds this together with coverage so neither number is presented as "success" alone. */
+  function hangupRate(scenarioRuns) {
+    const total = scenarioRuns.length;
+    const normal = scenarioRuns.filter((r) => NORMAL_END_REASONS.has(r.endReason)).length;
+    return total > 0 ? normal / total : null;
+  }
+
+  /** Fraction of `allNodeIds` actually present in `perNode` -- the exact same definition
+   * ui/BenchmarkAnalyticsViews.jsx's NodeCoverageMatrix uses for its Total row (visitedCount /
+   * allNodeIds.length), so a candidate's coverage number here always matches what that table would
+   * show for the same set of variants -- no more disagreeing with the matrix above it on the page. */
+  function coverageOf(perNode, allNodeIds) {
+    if (allNodeIds.length === 0) return null;
+    return allNodeIds.filter((id) => perNode[id]).length / allNodeIds.length;
+  }
+
+  /** The actual reliability score every ranking below sorts on: clean-hangup rate × node coverage.
+   * Multiplicative on purpose -- a candidate that never crashes but only ever reaches half the
+   * workflow should NOT outrank one that's slightly less clean but actually does the whole job, and
+   * a simple average would let a high hangup rate paper over near-zero coverage. Either component
+   * missing (no samples at all) makes the whole score unknown rather than silently treating the
+   * missing half as perfect. */
+  function reliabilityOf(hangup, coverage) {
+    if (hangup == null || coverage == null) return null;
+    return hangup * coverage;
+  }
+
+  /** Ranks candidates by reliability first (higher is better), latency second (lower is better) --
+   * the rule the user asked for verbatim for both the TTS and the LLM recommendation: "le plus
+   * stable / rapide" / "le taux de succès le plus important ... et la latence la plus faible",
+   * "stable"/"succès" now meaning reliabilityOf (hangup × coverage), not hangup rate alone. A
+   * candidate with no reliability (no samples) or no latency (metric never recorded) sorts last on
+   * that axis rather than crashing the comparison. */
+  function rankCandidates(candidates) {
+    return [...candidates].sort((a, b) => {
+      if (a.reliability !== b.reliability) {
+        if (a.reliability == null) return 1;
+        if (b.reliability == null) return -1;
+        return b.reliability - a.reliability;
+      }
+      const aAvg = a.latency ? a.latency.avg : Infinity;
+      const bAvg = b.latency ? b.latency.avg : Infinity;
+      return aAvg - bAvg;
+    });
+  }
+
+  /**
+   * Proposes the best callee configuration from a computeGlobalAnalytics result's full (llm, tts)
+   * breakdown (always the raw breakdown, independent of AnalyticsPanel's "Breakdown by TTS" display
+   * toggle -- that toggle only affects what's SHOWN, this needs every axis attributed separately to
+   * tell a TTS effect apart from an LLM effect). Confirmed with the user 2026-10-05:
+   *   1. Best TTS -- grouped by TTS model (pooling every LLM it was run with), ranked by reliability
+   *      (hangup rate × node coverage, see reliabilityOf) then pooled TTS latency: "le plus stable /
+   *      rapide sur tous les tests concernés".
+   *   2. Best LLM -- same rule, grouped by LLM (pooling every TTS it was run with), pooled LLM
+   *      latency: "le taux de succès le plus important ... et la latence la plus faible".
+   *   3. Per-node LLM pick -- for each workflow node, combines that SAME per-LLM hangup rate from #2
+   *      (a global signal; there's no per-node hangup signal to rank on, since endReason only
+   *      describes the whole run, not where in the workflow it happened) with a NODE-SPECIFIC
+   *      coverage figure instead of the global one -- the fraction of this LLM's own variant-groups
+   *      that reached THIS node at all -- paired with that LLM's latency AT THIS node. Lets two
+   *      different nodes end up recommending two different LLMs when both are equally clean overall
+   *      but one actually reaches (and is faster at) a particular node more reliably than the other
+   *      -- "proposer une version de cet agent qui se base sur plusieurs LLMs pour optimiser la
+   *      perf".
+   * Node coverage (global or per-node) is always computed against `allNodeIds` -- every node any
+   * variant in this result ever visited -- the same denominator NodeCoverageMatrix's Total row uses.
+   * Excludes the "unknown config" bucket and a genuinely untouched (null) axis from every ranking --
+   * there's nothing concrete to recommend for "unspecified".
+   */
+  function computeRecommendations(result) {
+    const variants = (result.variants || []).filter((v) => v.variantId !== "unknown");
+    const allNodeIds = Array.from(new Set(variants.flatMap((v) => Object.keys(v.perNode)))).sort();
+
+    const byTts = groupBy(variants, (v) => v.ttsModelId || null);
+    const ttsRanking = rankCandidates(
+      Array.from(byTts.entries()).map(([ttsModelId, vs]) => {
+        const perNode = mergePerNode(vs.map((v) => v.perNode));
+        const hangup = hangupRate(vs.flatMap((v) => v.scenarioRuns || []));
+        const coverage = coverageOf(perNode, allNodeIds);
+        return { id: ttsModelId, hangupRate: hangup, coverage, reliability: reliabilityOf(hangup, coverage), latency: combineNodeStats(perNode, "tts"), sampleCount: vs.length };
+      }),
+    );
+
+    const byLlm = groupBy(variants, (v) => v.llm || null);
+    const llmRanking = rankCandidates(
+      Array.from(byLlm.entries()).map(([llm, vs]) => {
+        const perNode = mergePerNode(vs.map((v) => v.perNode));
+        const hangup = hangupRate(vs.flatMap((v) => v.scenarioRuns || []));
+        const coverage = coverageOf(perNode, allNodeIds);
+        return { id: llm, hangupRate: hangup, coverage, reliability: reliabilityOf(hangup, coverage), latency: combineNodeStats(perNode, "llm"), sampleCount: vs.length };
+      }),
+    );
+    const llmHangupRate = new Map(llmRanking.map((c) => [c.id, c.hangupRate]));
+
+    const perNode = allNodeIds.map((nodeId) => ({
+      nodeId,
+      ranking: rankCandidates(
+        Array.from(byLlm.entries())
+          .map(([llm, vs]) => {
+            const withNode = vs.filter((v) => v.perNode[nodeId]);
+            if (withNode.length === 0) return null; // this LLM never routed through this node at all
+            const nodeLatency = withNode.map((v) => v.perNode[nodeId].llm).reduce((acc, s) => mergeStat(acc, s), null);
+            const hangup = llmHangupRate.get(llm);
+            const nodeReach = withNode.length / vs.length; // this node's coverage, for just this LLM's own variant-groups
+            return { id: llm, hangupRate: hangup, coverage: nodeReach, reliability: reliabilityOf(hangup, nodeReach), latency: nodeLatency, sampleCount: withNode.length };
+          })
+          .filter(Boolean),
+      ),
+    }));
+
+    return { ttsRanking, llmRanking, perNode };
+  }
+
+  window.AB.session.GlobalAnalytics = { computeGlobalAnalytics, groupVariantsByLlm, computeRecommendations };
 })();

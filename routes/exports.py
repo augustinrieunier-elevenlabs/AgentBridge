@@ -32,6 +32,20 @@ def read_export():
         return jsonify({"error": "Export not found"}), 404
 
 
+@bp.patch("")
+def update_export():
+    path = request.args.get("path", "")
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+    try:
+        return jsonify(config_store.update_export(current_app.instance_path, path, body))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "Export not found"}), 404
+
+
 @bp.delete("")
 def clear_exports():
     config_store.clear_exports(current_app.instance_path)

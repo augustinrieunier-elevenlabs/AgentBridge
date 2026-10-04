@@ -33,13 +33,24 @@
     // group a session or batch run by config exactly like it already groups benchmark variants,
     // instead of every non-benchmark run being permanently unattributable to any config. Never
     // blocks the save: a run with no calleeConfig just lands in that view's "unknown config" bucket.
+    //
+    // Also snapshots the callee's Workflow node id -> {label, type} map (nodeNames) at the same
+    // time, for the same reason: a conversation's turn metrics only ever carry the raw node id, so
+    // without this, Analytics would have to live-fetch the agent just to show readable node names
+    // every time it's opened. Saving it now, once, while we already know which callee agent this
+    // run used, means GlobalAnalytics.js never needs to ask the live API for a run saved after this
+    // existed (see resolveNodeNames there for the backfill path for OLDER runs/exports).
     let calleeConfig = null;
+    let nodeNames = null;
     if (calleeAgent) {
-      try {
-        calleeConfig = await window.AB.api.agents.getModelConfig(calleeAgent.accountId, calleeAgent.agentId);
-      } catch (err) {
-        console.error("Could not snapshot callee model config for history", err);
-      }
+      const [configResult, nodeNamesResult] = await Promise.allSettled([
+        window.AB.api.agents.getModelConfig(calleeAgent.accountId, calleeAgent.agentId),
+        window.AB.api.agents.getWorkflowNodes(calleeAgent.accountId, calleeAgent.agentId),
+      ]);
+      if (configResult.status === "fulfilled") calleeConfig = configResult.value;
+      else console.error("Could not snapshot callee model config for history", configResult.reason);
+      if (nodeNamesResult.status === "fulfilled") nodeNames = nodeNamesResult.value;
+      else console.error("Could not snapshot workflow node names for history", nodeNamesResult.reason);
     }
 
     const payload = {
@@ -51,6 +62,7 @@
       caller: agentSummary(callerAgent),
       callee: agentSummary(calleeAgent),
       calleeConfig,
+      nodeNames,
       conversations: conversations || [],
       ...(extra || {}),
     };

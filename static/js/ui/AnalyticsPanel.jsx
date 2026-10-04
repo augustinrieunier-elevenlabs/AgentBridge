@@ -9,8 +9,15 @@
 (function () {
   const { useState } = React;
   const { GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart } = window.AB.ui.benchmarkViews;
+  const Tabs = window.AB.ui.Tabs;
+  const RecommendationPanel = window.AB.ui.RecommendationPanel;
 
-  function AnalyticsPanel({ config }) {
+  const SUB_TABS = [
+    { value: "overview", label: "Overview" },
+    { value: "recommendation", label: "Recommendation" },
+  ];
+
+  function AnalyticsPanel({ config, accounts }) {
     const calleeAgents = config.agents.filter((a) => a.role === "callee" || a.role === "both");
     const [calleeAgentId, setCalleeAgentId] = useState(calleeAgents[0] ? calleeAgents[0].id : "");
     const [scenarioIds, setScenarioIds] = useState([]); // empty = no filter, every scenario included
@@ -18,8 +25,12 @@
     const [progress, setProgress] = useState(null);
     const [result, setResult] = useState(null); // always the full (llm, tts) breakdown
     const [error, setError] = useState(null);
+    const [subTab, setSubTab] = useState("overview");
     // Off = pure-LLM view: TTS collapsed out of the grouping, ASR hidden -- a display-time transform
     // of `result`, not a refetch, so toggling this is instant (see GlobalAnalytics.groupVariantsByLlm).
+    // Only affects the Overview tab -- Recommendation always ranks from the full breakdown (see
+    // RecommendationPanel.jsx / computeRecommendations), since telling a TTS effect apart from an
+    // LLM effect needs every axis attributed separately, not pooled for display.
     const [breakdownByTts, setBreakdownByTts] = useState(true);
 
     const displayResult = result && !breakdownByTts ? window.AB.session.GlobalAnalytics.groupVariantsByLlm(result) : result;
@@ -80,15 +91,6 @@
               {phase === "running" ? "Analyzing…" : "Run analysis"}
             </button>
           </div>
-          <label className="checkbox-row">
-            <input type="checkbox" checked={breakdownByTts} onChange={(e) => setBreakdownByTts(e.target.checked)} />
-            Breakdown by TTS model
-          </label>
-          <p className="panel-help">
-            {breakdownByTts
-              ? "Each row is one (LLM, TTS) combination actually run together."
-              : "Rows are grouped by LLM only, pooling every TTS model run with it -- ASR hidden, for a pure LLM performance + node coverage view."}
-          </p>
           <fieldset>
             <legend>Scenarios ({scenarioIds.length === 0 ? "all" : scenarioIds.length} selected)</legend>
             <p className="panel-help">Leave none checked to include every scenario found in this agent's history.</p>
@@ -123,11 +125,30 @@
           <p className="panel-help">"Unknown config" groups runs saved before this agent's TTS/LLM was snapshotted per-run -- re-run them to get them attributed to a real config.</p>
         )}
 
-        {displayResult && displayResult.variants.length > 0 && (
+        {result && result.variants.length > 0 && (
           <>
-            <GlobalStatsTable result={displayResult} showAsr={breakdownByTts} />
-            <NodeCoverageMatrix result={displayResult} />
-            <StackedLatencyChart result={displayResult} showAsr={breakdownByTts} />
+            <Tabs value={subTab} onChange={setSubTab} options={SUB_TABS} />
+
+            {subTab === "overview" && (
+              <>
+                <div className="card">
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={breakdownByTts} onChange={(e) => setBreakdownByTts(e.target.checked)} />
+                    Breakdown by TTS model
+                  </label>
+                  <p className="panel-help">
+                    {breakdownByTts
+                      ? "Each row is one (LLM, TTS) combination actually run together."
+                      : "Rows are grouped by LLM only, pooling every TTS model run with it -- ASR hidden, for a pure LLM performance + node coverage view."}
+                  </p>
+                </div>
+                <GlobalStatsTable result={displayResult} showAsr={breakdownByTts} />
+                <NodeCoverageMatrix result={displayResult} nodeNames={result.nodeNames} />
+                <StackedLatencyChart result={displayResult} showAsr={breakdownByTts} />
+              </>
+            )}
+
+            {subTab === "recommendation" && <RecommendationPanel result={result} config={config} accounts={accounts} calleeAgent={calleeAgent} />}
           </>
         )}
       </div>

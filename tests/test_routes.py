@@ -87,6 +87,76 @@ def test_pending_restore_round_trips_through_the_api(client):
     assert client.get("/api/agents/demo-a/agent_123/pending-restore").get_json() is None
 
 
+def test_get_workflow_nodes_rejects_unknown_account(client):
+    res = client.get("/api/agents/unknown-account/agent_123/workflow-nodes")
+    assert res.status_code == 400
+
+
+def test_get_workflow_nodes_returns_the_agents_node_map(client, monkeypatch):
+    monkeypatch.setattr(eleven_api, "get_agent_workflow_nodes", lambda account_id, agent_id: {"start_node": {"label": "start_node", "type": "start"}})
+
+    res = client.get("/api/agents/demo-a/agent_123/workflow-nodes")
+
+    assert res.status_code == 200
+    assert res.get_json() == {"start_node": {"label": "start_node", "type": "start"}}
+
+
+def test_get_workflow_returns_the_raw_workflow_object(client, monkeypatch):
+    monkeypatch.setattr(eleven_api, "get_agent_workflow", lambda account_id, agent_id: {"nodes": {}, "edges": {}})
+
+    res = client.get("/api/agents/demo-a/agent_123/workflow")
+
+    assert res.status_code == 200
+    assert res.get_json() == {"nodes": {}, "edges": {}}
+
+
+def test_set_workflow_rejects_unknown_account(client):
+    res = client.post("/api/agents/unknown-account/agent_123/workflow", json={"workflow": {}})
+    assert res.status_code == 400
+
+
+def test_set_workflow_rejects_a_missing_workflow_field(client):
+    res = client.post("/api/agents/demo-a/agent_123/workflow", json={})
+    assert res.status_code == 400
+
+
+def test_set_workflow_calls_eleven_api_with_the_posted_workflow(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(eleven_api, "update_agent_workflow", lambda account_id, agent_id, workflow: calls.append((account_id, agent_id, workflow)))
+
+    res = client.post("/api/agents/demo-a/agent_123/workflow", json={"workflow": {"nodes": {"start_node": {"type": "start"}}}})
+
+    assert res.status_code == 200
+    assert calls == [("demo-a", "agent_123", {"nodes": {"start_node": {"type": "start"}}})]
+
+
+def test_set_workflow_node_llms_rejects_a_missing_llm_by_node_id_field(client):
+    res = client.post("/api/agents/demo-a/agent_123/workflow/node-llm", json={})
+    assert res.status_code == 400
+
+
+def test_set_workflow_node_llms_calls_eleven_api_with_the_posted_map(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(eleven_api, "set_workflow_node_llms", lambda account_id, agent_id, llm_by_node_id: calls.append((account_id, agent_id, llm_by_node_id)))
+
+    res = client.post("/api/agents/demo-a/agent_123/workflow/node-llm", json={"llmByNodeId": {"error_codes": "claude-sonnet-5-5"}})
+
+    assert res.status_code == 200
+    assert calls == [("demo-a", "agent_123", {"error_codes": "claude-sonnet-5-5"})]
+
+
+def test_set_workflow_node_llms_surfaces_an_eleven_api_error_as_400(client, monkeypatch):
+    def raise_error(account_id, agent_id, llm_by_node_id):
+        raise eleven_api.ElevenApiError("Unknown workflow node: does-not-exist")
+
+    monkeypatch.setattr(eleven_api, "set_workflow_node_llms", raise_error)
+
+    res = client.post("/api/agents/demo-a/agent_123/workflow/node-llm", json={"llmByNodeId": {"does-not-exist": "claude-sonnet-5-5"}})
+
+    assert res.status_code == 502
+    assert "Unknown workflow node" in res.get_json()["error"]
+
+
 def test_pending_restore_rejects_unknown_account(client):
     res = client.get("/api/agents/unknown-account/agent_123/pending-restore")
     assert res.status_code == 400
@@ -141,6 +211,23 @@ def test_export_round_trips_through_the_api(client):
 
     read_res = client.get("/api/exports/read", query_string={"path": path})
     assert read_res.get_json() == {"turns": []}
+
+
+def test_update_export_merges_a_patch_via_the_api(client):
+    save_res = client.post("/api/exports", json={"name": "demo", "data": {"runType": "session", "conversations": []}})
+    path = save_res.get_json()["path"]
+
+    patch_res = client.patch("/api/exports", query_string={"path": path}, json={"nodeNames": {"start_node": {"label": "start_node", "type": "start"}}})
+    assert patch_res.status_code == 200
+    assert patch_res.get_json()["nodeNames"]["start_node"]["label"] == "start_node"
+
+    read_res = client.get("/api/exports/read", query_string={"path": path})
+    assert read_res.get_json()["nodeNames"]["start_node"]["label"] == "start_node"
+
+
+def test_update_export_rejects_path_outside_exports_dir(client):
+    res = client.patch("/api/exports", query_string={"path": "/etc/passwd"}, json={"nodeNames": {}})
+    assert res.status_code == 400
 
 
 def test_clear_exports_via_the_api(client):

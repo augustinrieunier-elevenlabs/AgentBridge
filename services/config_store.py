@@ -117,6 +117,25 @@ def read_export(instance_path, file_path):
         return json.load(f)
 
 
+def update_export(instance_path, file_path, patch):
+    """Merges `patch` into an existing export file's top level. Used to backfill `nodeNames`
+    (workflow node id -> {label, type}) into an export saved before that lookup existed, the first
+    time the Analytics view needs it for this callee agent's history -- so the live API call it
+    took to resolve them isn't repeated on every later analytics pass (see
+    session/GlobalAnalytics.js resolveNodeNames). Shallow merge only: every patch this is called
+    with is a brand new top-level key, never a nested field that needs merging into existing data."""
+    exports_dir = os.path.realpath(_exports_dir(instance_path))
+    resolved = os.path.realpath(file_path)
+    if not resolved.startswith(exports_dir):
+        raise ValueError("Refusing to write a file outside the exports directory")
+    with open(resolved, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.update(_strip_secret_like(patch))
+    with open(resolved, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return data
+
+
 def clear_exports(instance_path):
     """Deletes every saved export (session/batch run history) -- used by History's "Clear history"
     button. Irreversible; the UI is expected to confirm before calling this. A no-op, not an error,

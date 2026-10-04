@@ -95,3 +95,28 @@ def test_read_export_rejects_path_outside_exports_dir(tmp_path):
     outside.write_text("{}")
     with pytest.raises(ValueError):
         config_store.read_export(str(tmp_path), str(outside))
+
+
+def test_update_export_merges_a_patch_into_the_existing_file(tmp_path):
+    path = config_store.save_export(str(tmp_path), "Get Account Details", {"runType": "session", "conversations": []})
+
+    updated = config_store.update_export(str(tmp_path), path, {"nodeNames": {"start_node": {"label": "start_node", "type": "start"}}})
+
+    assert updated["nodeNames"] == {"start_node": {"label": "start_node", "type": "start"}}
+    assert updated["runType"] == "session"  # existing fields untouched
+    assert config_store.read_export(str(tmp_path), path)["nodeNames"] == {"start_node": {"label": "start_node", "type": "start"}}
+
+
+def test_update_export_strips_anything_that_looks_like_a_secret(tmp_path):
+    path = config_store.save_export(str(tmp_path), "Get Account Details", {"conversations": []})
+
+    updated = config_store.update_export(str(tmp_path), path, {"leaked": "sk_live_should_never_be_here"})
+
+    assert updated["leaked"] is None
+
+
+def test_update_export_rejects_path_outside_exports_dir(tmp_path):
+    outside = tmp_path.parent / "outside.json"
+    outside.write_text("{}")
+    with pytest.raises(ValueError):
+        config_store.update_export(str(tmp_path), str(outside), {"nodeNames": {}})

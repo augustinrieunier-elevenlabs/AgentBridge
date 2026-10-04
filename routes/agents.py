@@ -56,6 +56,64 @@ def list_llms(account_id):
         return jsonify({"error": str(exc)}), exc.status_code or 502
 
 
+@bp.get("/<account_id>/<agent_id>/workflow-nodes")
+def get_workflow_nodes(account_id, agent_id):
+    try:
+        _require_known_account(account_id)
+        _require_safe_agent_id(agent_id)
+        return jsonify(eleven_api.get_agent_workflow_nodes(account_id, agent_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except ElevenApiError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code or 502
+
+
+@bp.get("/<account_id>/<agent_id>/workflow")
+def get_workflow(account_id, agent_id):
+    try:
+        _require_known_account(account_id)
+        _require_safe_agent_id(agent_id)
+        return jsonify(eleven_api.get_agent_workflow(account_id, agent_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except ElevenApiError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code or 502
+
+
+@bp.post("/<account_id>/<agent_id>/workflow")
+def set_workflow(account_id, agent_id):
+    try:
+        _require_known_account(account_id)
+        _require_safe_agent_id(agent_id)
+        body = request.get_json(silent=True) or {}
+        workflow = body.get("workflow")
+        if not isinstance(workflow, dict):
+            return jsonify({"error": "Expected a 'workflow' object"}), 400
+        eleven_api.update_agent_workflow(account_id, agent_id, workflow)
+        return jsonify({"ok": True})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except ElevenApiError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code or 502
+
+
+@bp.post("/<account_id>/<agent_id>/workflow/node-llm")
+def set_workflow_node_llms(account_id, agent_id):
+    try:
+        _require_known_account(account_id)
+        _require_safe_agent_id(agent_id)
+        body = request.get_json(silent=True) or {}
+        llm_by_node_id = body.get("llmByNodeId")
+        if not isinstance(llm_by_node_id, dict):
+            return jsonify({"error": "Expected an 'llmByNodeId' object"}), 400
+        eleven_api.set_workflow_node_llms(account_id, agent_id, llm_by_node_id)
+        return jsonify({"ok": True})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except ElevenApiError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code or 502
+
+
 @bp.get("/<account_id>/<agent_id>/model-config")
 def get_model_config(account_id, agent_id):
     try:

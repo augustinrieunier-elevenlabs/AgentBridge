@@ -8,10 +8,47 @@
  * so the two views read identically regardless of which feature produced the underlying data.
  */
 (function () {
-  const { combineNodeStats } = window.AB.session.BenchmarkRunner;
+  const { combineNodeStats, NORMAL_END_REASONS } = window.AB.session.BenchmarkRunner;
 
   function formatMs(valueSec) {
     return valueSec == null ? "—" : `${Math.round(valueSec * 1000)} ms`;
+  }
+
+  // `nodeNames` (workflow node id -> {label, type}) is optional everywhere it's passed -- older
+  // runs/exports predating this lookup, or a run whose live resolution hasn't landed yet, simply
+  // fall back to the raw id (exactly what every node looked like before this existed), never a
+  // blank/broken cell.
+  function nodeLabel(nodeId, nodeNames) {
+    const info = nodeNames && nodeNames[nodeId];
+    return (info && info.label) || nodeId;
+  }
+
+  function nodeTitle(nodeId, nodeNames) {
+    const info = nodeNames && nodeNames[nodeId];
+    return info ? `id: ${nodeId}${info.type ? `, type: ${info.type}` : ""}` : nodeId;
+  }
+
+  /** Wraps one analytics section in a collapsible "card" -- a single benchmark/Analytics page can
+   * stack a dozen+ of these (node coverage, stacked chart, a results table per node...), so
+   * collapsing the ones you're not looking at is the difference between scrolling past everything
+   * every time and actually navigating. Only the title (icon + text) toggles the body; `headerExtra`
+   * (e.g. NodeCoverageMatrix/StackedLatencyChart's sort buttons) stays a normal sibling in the same
+   * `.card-row`, unaffected by and not triggering the toggle, so it's still usable without first
+   * expanding anything. Defaults open so nothing changes for anyone who never touches the toggle. */
+  function CollapsibleCard({ title, headerExtra, defaultOpen = true, children }) {
+    const { useState } = React;
+    const [open, setOpen] = useState(defaultOpen);
+    return (
+      <div className="card">
+        <div className="card-row">
+          <strong className="collapsible-title" onClick={() => setOpen((o) => !o)}>
+            <span className={`collapsible-caret${open ? " open" : ""}`}>▸</span> {title}
+          </strong>
+          {headerExtra}
+        </div>
+        {open && children}
+      </div>
+    );
   }
 
   // Matches --ok/--warn/--fail from styles.css, for a continuous coverage-ratio gradient (see
@@ -83,8 +120,7 @@
    * node a variant never visited simply isn't in `perNode` and correctly contributes nothing. */
   function GlobalStatsTable({ result, showAsr = true }) {
     return (
-      <div className="card">
-        <strong>Global stats -- all nodes combined</strong>
+      <CollapsibleCard title="Global stats -- all nodes combined">
         <table className="table">
           <thead>
             <tr>
@@ -113,7 +149,7 @@
             ))}
           </tbody>
         </table>
-      </div>
+      </CollapsibleCard>
     );
   }
 
@@ -133,7 +169,6 @@
   // abnormally ties it to an observed problem instead of inferring one from statistics alone, and
   // eliminated every false positive in that comparison.
   const LOW_TURN_COUNT_RATIO = 0.7;
-  const NORMAL_END_REASONS = new Set(["caller_websocket_closed", "callee_websocket_closed"]);
 
   /**
    * For the same scenarios, every variant should in principle route through the same workflow
@@ -164,7 +199,7 @@
   const COVERAGE_NODE_COL_PX = 220;
   const COVERAGE_VARIANT_COL_PX = 160;
 
-  function NodeCoverageMatrix({ result }) {
+  function NodeCoverageMatrix({ result, nodeNames }) {
     const { useState } = React;
     const [sortOrder, setSortOrder] = useState("label");
 
@@ -205,9 +240,9 @@
     }
 
     return (
-      <div className="card">
-        <div className="card-row">
-          <strong>Node coverage -- did every variant reach the same nodes, the same number of times?</strong>
+      <CollapsibleCard
+        title="Node coverage -- did every variant reach the same nodes, the same number of times?"
+        headerExtra={
           <div className="stacked-chart-sort">
             {COVERAGE_SORT_OPTIONS.map((opt) => (
               <button key={opt.value} className={sortOrder === opt.value ? "active" : ""} onClick={() => setSortOrder(opt.value)}>
@@ -215,7 +250,8 @@
               </button>
             ))}
           </div>
-        </div>
+        }
+      >
         <p className="panel-help">
           Every variant runs the same scenarios, so it should visit the same nodes about as many times. ✗ means that variant's calls never routed through this node at all -- a routing/behavior
           change from the model/TTS swap, not a timing gap. ⚠ (only shown for a variant that had a scenario end abnormally) means it DID reach the node but did notably less there than another
@@ -247,7 +283,7 @@
                   const maxForNode = maxTurnCountByNode[nodeId];
                   return (
                     <tr key={nodeId}>
-                      <td>{nodeId}</td>
+                      <td title={nodeTitle(nodeId, nodeNames)}>{nodeLabel(nodeId, nodeNames)}</td>
                       {chunk.variants.map((v) => {
                         const stats = v.perNode[nodeId];
                         if (!stats) {
@@ -297,7 +333,7 @@
             </table>
           </div>
         ))}
-      </div>
+      </CollapsibleCard>
     );
   }
 
@@ -322,8 +358,10 @@
    * library, consistent with this app's no-build-step/CDN-only dependency policy. */
   const SORT_OPTIONS = [
     { value: "none", label: "As run" },
-    { value: "asc", label: "↑ Ascending" },
-    { value: "desc", label: "↓ Descending" },
+    { value: "latency-asc", label: "Latency ↑" },
+    { value: "latency-desc", label: "Latency ↓" },
+    { value: "coverage-asc", label: "Coverage ↑" },
+    { value: "coverage-desc", label: "Coverage ↓" },
   ];
 
   function StackedLatencyChart({ result, showAsr = true }) {
@@ -346,16 +384,17 @@
       const coverageRatio = allNodeIds.length > 0 ? allNodeIds.filter((id) => v.perNode[id]).length / allNodeIds.length : 1;
       return { key: v.variantId, label: v.label, ...values, total, coverageRatio };
     });
-    if (sortOrder !== "none") {
-      bars.sort((a, b) => (sortOrder === "asc" ? a.total - b.total : b.total - a.total));
-    }
+    if (sortOrder === "latency-asc") bars.sort((a, b) => a.total - b.total);
+    else if (sortOrder === "latency-desc") bars.sort((a, b) => b.total - a.total);
+    else if (sortOrder === "coverage-asc") bars.sort((a, b) => a.coverageRatio - b.coverageRatio);
+    else if (sortOrder === "coverage-desc") bars.sort((a, b) => b.coverageRatio - a.coverageRatio);
     const maxTotal = Math.max(1e-9, ...bars.map((b) => b.total));
     const axisTicks = CHART_AXIS_FRACTIONS.map((f) => f * maxTotal);
 
     return (
-      <div className="card">
-        <div className="card-row">
-          <strong>Average latency per variant -- {series.map((s) => s.label).join(" + ")} stacked (all nodes combined)</strong>
+      <CollapsibleCard
+        title={`Average latency per variant -- ${series.map((s) => s.label).join(" + ")} stacked (all nodes combined)`}
+        headerExtra={
           <div className="stacked-chart-sort">
             {SORT_OPTIONS.map((opt) => (
               <button key={opt.value} className={sortOrder === opt.value ? "active" : ""} onClick={() => setSortOrder(opt.value)}>
@@ -363,7 +402,8 @@
               </button>
             ))}
           </div>
-        </div>
+        }
+      >
         <div className="stacked-chart-legend">
           {series.map((s) => {
             const isLlm = s.key === "llm";
@@ -405,16 +445,15 @@
             ))}
           </div>
         </div>
-      </div>
+      </CollapsibleCard>
     );
   }
 
-  function ResultsTables({ result }) {
+  function ResultsTables({ result, nodeNames }) {
     const nodeIds = Array.from(new Set(result.variants.flatMap((v) => Object.keys(v.perNode)))).sort();
     return (
       <div>
-        <div className="card">
-          <strong>ASR time -- global, across all of the caller's turns</strong>
+        <CollapsibleCard title="ASR time -- global, across all of the caller's turns">
           <table className="table">
             <thead>
               <tr>
@@ -433,13 +472,15 @@
               ))}
             </tbody>
           </table>
-        </div>
+        </CollapsibleCard>
 
         {nodeIds.length === 0 && <p className="panel-help">No per-node data found in the collected conversations -- the workflow may not have reported node ids for these turns.</p>}
 
         {nodeIds.map((nodeId) => (
-          <div key={nodeId} className="card">
-            <strong>Node: {nodeId}</strong>
+          // Collapsed by default -- these are the most granular, least-often-needed-at-a-glance
+          // tables on the page (one per node, every one of them, regardless of how many), and the
+          // card coverage matrix/stacked chart above already give the at-a-glance picture.
+          <CollapsibleCard key={nodeId} title={<span title={nodeTitle(nodeId, nodeNames)}>Node: {nodeLabel(nodeId, nodeNames)}</span>} defaultOpen={false}>
             <table className="table">
               <thead>
                 <tr>
@@ -469,11 +510,22 @@
                 })}
               </tbody>
             </table>
-          </div>
+          </CollapsibleCard>
         ))}
       </div>
     );
   }
 
-  window.AB.ui.benchmarkViews = { formatMs, StatCell, NodeStatCell, GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart, ResultsTables };
+  window.AB.ui.benchmarkViews = {
+    formatMs,
+    StatCell,
+    NodeStatCell,
+    GlobalStatsTable,
+    NodeCoverageMatrix,
+    StackedLatencyChart,
+    ResultsTables,
+    CollapsibleCard,
+    nodeLabel,
+    nodeTitle,
+  };
 })();

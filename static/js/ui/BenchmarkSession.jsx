@@ -28,6 +28,7 @@
     const [deadlockCount, setDeadlockCount] = useState(0);
     const [pendingRestore, setPendingRestore] = useState(null);
     const [restoring, setRestoring] = useState(false);
+    const [nodeNames, setNodeNames] = useState({});
 
     // ASR/TTS timing only exists when real audio actually ran that pipeline, so a benchmark that
     // varies TTS always needs it -- text-only is only offered (and only ever actually used) when
@@ -66,8 +67,7 @@
       if (!calleeAgent || !pendingRestore) return;
       setRestoring(true);
       try {
-        await window.AB.api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, pendingRestore);
-        await window.AB.api.agents.clearPendingRestore(calleeAgent.accountId, calleeAgent.agentId);
+        await window.AB.session.PendingRestore.restorePendingConfig(window.AB.api, calleeAgent, pendingRestore);
         setPendingRestore(null);
       } catch (err) {
         alert(`Could not restore the callee's config: ${err.message}`);
@@ -118,6 +118,7 @@
           textOnly: effectiveTextOnly,
           snapshot: outcome.snapshot,
           variants: outcome.variants,
+          nodeNames: outcome.nodeNames,
         });
         setResult(saved); // same shape as a pastRuns entry (has an id) -- see refreshRun
         setPastRuns((prev) => [saved, ...prev]);
@@ -157,13 +158,43 @@
     const selectedPastRun = pastRuns.find((r) => r.id === selectedPastRunId) || null;
     const shownResult = selectedPastRun || result;
 
+    // Workflow node id -> {label, type}, for NodeCoverageMatrix/ResultsTables to show readable node
+    // names instead of the platform's raw id. A run saved after this feature shipped already
+    // carries its own `nodeNames` (see the save call above / RunHistory.js) -- no API call needed.
+    // An OLDER run predates that: fetch it once here and patch it onto the stored run, so the next
+    // time this exact run is viewed (even after a reload) it's already there -- see
+    // GlobalAnalytics.js's resolveNodeNames for the equivalent backfill on the cross-feature
+    // Analytics view.
+    useEffect(() => {
+      if (!shownResult) {
+        setNodeNames({});
+        return;
+      }
+      if (shownResult.nodeNames) {
+        setNodeNames(shownResult.nodeNames);
+        return;
+      }
+      if (!calleeAgent) return;
+      let cancelled = false;
+      window.AB.api.agents
+        .getWorkflowNodes(calleeAgent.accountId, calleeAgent.agentId)
+        .then((names) => {
+          if (cancelled) return;
+          setNodeNames(names);
+          window.AB.api.benchmarkRuns.update(shownResult.id, { nodeNames: names }).catch((err) => console.error("Could not backfill node names into benchmark run", shownResult.id, err));
+        })
+        .catch((err) => console.error("Could not resolve workflow node names", err));
+      return () => {
+        cancelled = true;
+      };
+    }, [shownResult && shownResult.id, shownResult && shownResult.nodeNames, calleeAgent && calleeAgent.accountId, calleeAgent && calleeAgent.agentId]);
+
     return (
       <div className="benchmark-session">
         {pendingRestore && (
           <div className="banner banner-warn">
-            This callee agent is still on config from a benchmark run that never finished cleanly: llm={pendingRestore.llm || "(unchanged)"}
-            {pendingRestore.tts_model_id ? `, tts=${pendingRestore.tts_model_id}` : ""} -- recorded {new Date(pendingRestore.recordedAt * 1000).toLocaleString()}. Every call against this agent
-            right now uses that config, not its real default.{" "}
+            This callee agent is still on config from a run that never finished cleanly: {window.AB.session.PendingRestore.describePendingRestore(pendingRestore)} -- recorded{" "}
+            {new Date(pendingRestore.recordedAt * 1000).toLocaleString()}. Every call against this agent right now uses that config, not its real default.{" "}
             <button onClick={restoreNow} disabled={restoring}>
               {restoring ? "Restoring…" : "Restore now"}
             </button>
@@ -254,9 +285,9 @@
         {shownResult && (
           <>
             <GlobalStatsTable result={shownResult} />
-            <NodeCoverageMatrix result={shownResult} />
+            <NodeCoverageMatrix result={shownResult} nodeNames={nodeNames} />
             <StackedLatencyChart result={shownResult} />
-            <ResultsTables result={shownResult} />
+            <ResultsTables result={shownResult} nodeNames={nodeNames} />
           </>
         )}
       </div>

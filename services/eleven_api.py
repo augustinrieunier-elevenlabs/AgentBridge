@@ -16,6 +16,16 @@ OpenAPI spec and a live sandbox agent:
                                                             require resending the full config;
                                                             used here for conversation_config.tts.model_id
                                                             and conversation_config.agent.prompt.llm only)
+
+Added for Workflow node-name resolution (2026-10-05), verified against the live ElevenLabs docs:
+    GET /v1/convai/agents/{agent_id}'s top-level `workflow.nodes` (dict keyed by node id, each
+    carrying a human-readable `label` and a `type`) -- see get_agent_workflow_nodes.
+
+Added for the "test a per-node LLM recommendation" feature (2026-10-05), verified empirically
+against a real sandbox agent (not just docs -- the docs don't spell out PATCH's merge semantics
+for `workflow`):
+    PATCH /v1/convai/agents/{agent_id} with a `workflow` key replaces the ENTIRE workflow, no
+    partial/deep-merge -- see update_agent_workflow / set_workflow_node_llms.
 """
 from urllib.parse import urlparse
 
@@ -177,6 +187,62 @@ def get_llm_list(account_id):
         }
         for l in data.get("llms", [])
     ]
+
+
+def get_agent_workflow_nodes(account_id, agent_id):
+    """Maps every Workflow node id to its human-readable `label` (and `type`), straight from the
+    agent's own Workflow definition -- the ONLY place that mapping exists. A conversation's turn
+    metrics only ever carry the raw node id (`agent_metadata.workflow_node_id`, see
+    static/js/session/BenchmarkRunner.js), which is unreadable for any node nobody renamed in the
+    dashboard (it keeps the platform's auto-generated default, e.g. "node_01ky2spx1hf69ad74gshkjapa6").
+    Verified field shape -- GET /v1/convai/agents/{agent_id} response has a top-level `workflow`
+    field, `workflow.nodes` a dict keyed by node id, each node carrying `label`/`type` among other
+    builder-only fields (position, edges) this app has no use for (2026-10-05)."""
+    agent = _request(account_id, f"/v1/convai/agents/{agent_id}")
+    nodes = (agent.get("workflow") or {}).get("nodes") or {}
+    return {node_id: {"label": (node or {}).get("label") or node_id, "type": (node or {}).get("type")} for node_id, node in nodes.items()}
+
+
+def get_agent_workflow(account_id, agent_id):
+    """The agent's ENTIRE raw `workflow` object (nodes, edges, subgraphs, prevent_subagent_loops),
+    completely unprocessed -- used to snapshot it before a per-node LLM test (see
+    set_workflow_node_llms) mutates it, so update_agent_workflow can restore it byte-for-byte
+    afterwards. Never trim/reshape this -- see update_agent_workflow's docstring for why."""
+    agent = _request(account_id, f"/v1/convai/agents/{agent_id}")
+    return agent.get("workflow") or {}
+
+
+def update_agent_workflow(account_id, agent_id, workflow):
+    """Replaces the agent's entire Workflow with `workflow`. Confirmed empirically against a real
+    sandbox agent (2026-10-05): PATCH /v1/convai/agents/{agent_id} does NOT deep-merge `workflow` --
+    a partial `workflow.nodes.<id>` object fails ("Unable to extract tag using discriminator
+    'type'"), and a `nodes` map missing other nodes is rejected too ("Workflow must contain a start
+    node") or, worse, would silently drop whatever wasn't included. `workflow` here must always be a
+    complete object -- in practice, always one read via get_agent_workflow (this run's own snapshot,
+    or the live current one for set_workflow_node_llms below) with only specific leaf fields changed,
+    never constructed from scratch."""
+    _request(account_id, f"/v1/convai/agents/{agent_id}", method="PATCH", body={"workflow": workflow})
+    return {"ok": True}
+
+
+def set_workflow_node_llms(account_id, agent_id, llm_by_node_id):
+    """Sets conversation_config.agent.prompt.llm on each named node, read-modify-write against the
+    agent's CURRENT live workflow (not a stale snapshot the caller might be holding), leaving every
+    other node and field untouched -- see update_agent_workflow's docstring for why a full
+    read-modify-write is required here, not a partial PATCH. Only a node whose `type` is
+    "override_agent" carries this field at all (confirmed against a real agent's workflow,
+    2026-10-05) -- a `start`/`end`/`tool`/`phone_number`/`standalone_agent` node has nothing to
+    override an LLM onto, so targeting one is a caller error, not something to silently ignore."""
+    workflow = get_agent_workflow(account_id, agent_id)
+    nodes = workflow.get("nodes") or {}
+    for node_id, llm in llm_by_node_id.items():
+        node = nodes.get(node_id)
+        if node is None:
+            raise ElevenApiError(f"Unknown workflow node: {node_id}")
+        if node.get("type") != "override_agent":
+            raise ElevenApiError(f"Node '{node_id}' is a '{node.get('type')}' node -- only an override_agent node carries a per-node LLM")
+        node.setdefault("conversation_config", {}).setdefault("agent", {}).setdefault("prompt", {})["llm"] = llm
+    return update_agent_workflow(account_id, agent_id, workflow)
 
 
 def get_agent_model_config(account_id, agent_id):

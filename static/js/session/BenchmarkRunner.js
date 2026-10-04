@@ -40,6 +40,14 @@
  * handled by the existing null-stat rendering, no special-casing needed here.
  */
 (function () {
+  // A scenario run's endReason that means "the conversation ran its course and both sides hung up
+  // normally" -- anything else (deadlock_timeout, max_duration_reached, a start_failed:... string)
+  // means it was cut short by something other than the scenario script finishing. Shared by
+  // ui/BenchmarkAnalyticsViews.jsx's NodeCoverageMatrix ("thin" node detection) and
+  // session/GlobalAnalytics.js's computeRecommendations (success-rate scoring) -- single source of
+  // truth so "what counts as a successful run" can't drift between the two.
+  const NORMAL_END_REASONS = new Set(["caller_websocket_closed", "callee_websocket_closed"]);
+
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -260,7 +268,17 @@
     if (variants.length === 0) throw new Error("Select at least one TTS or LLM variant to benchmark.");
     if (scenarios.length === 0) throw new Error("Select at least one scenario to benchmark.");
 
-    const snapshot = await api.agents.getModelConfig(calleeAgent.accountId, calleeAgent.agentId);
+    const [snapshot, nodeNames] = await Promise.all([
+      api.agents.getModelConfig(calleeAgent.accountId, calleeAgent.agentId),
+      // Workflow node id -> {label, type}, saved alongside this run (see BenchmarkSession.jsx's
+      // save call) so NodeCoverageMatrix/ResultsTables can show readable node names without ever
+      // needing a live API call for a run saved after this existed -- see GlobalAnalytics.js
+      // resolveNodeNames for how an OLDER run/export without this gets backfilled on first view.
+      api.agents.getWorkflowNodes(calleeAgent.accountId, calleeAgent.agentId).catch((err) => {
+        console.error("Could not fetch workflow node names for this benchmark run", err);
+        return null;
+      }),
+    ]);
     // Durably records "this callee agent needs restoring to `snapshot`" BEFORE anything below
     // mutates it -- not just an in-memory variable here. If this run is interrupted (the page
     // navigated away, a crash) before the `finally` below runs, this record survives independently
@@ -270,8 +288,10 @@
     // silently captures that already-broken state as if it were correct, and the corruption
     // propagates forward through every run's restore from then on -- nothing short of manually
     // querying the agent's live config and every past run's recorded snapshot ever reveals it. See
-    // BenchmarkSession.jsx's startup check, which looks for exactly this record.
-    await api.agents.savePendingRestore(calleeAgent.accountId, calleeAgent.agentId, snapshot);
+    // BenchmarkSession.jsx's startup check, which looks for exactly this record. `kind:
+    // "model-config"` lets session/PendingRestore.js tell this apart from a
+    // RecommendationTest.js Workflow snapshot -- same per-agent record, two possible shapes.
+    await api.agents.savePendingRestore(calleeAgent.accountId, calleeAgent.agentId, { ...snapshot, kind: "model-config" });
     const variantResults = [];
 
     try {
@@ -357,7 +377,7 @@
       await api.agents.clearPendingRestore(calleeAgent.accountId, calleeAgent.agentId);
     }
 
-    return { snapshot, variants: variantResults };
+    return { snapshot, variants: variantResults, nodeNames };
   }
 
   /**
@@ -391,6 +411,7 @@
     refreshRunStats,
     computeMinMaxAvg,
     combineNodeStats,
+    NORMAL_END_REASONS,
     // Exported for session/GlobalAnalytics.js, which reuses the exact same extraction/aggregation
     // pipeline to harmonize session/batch/benchmark history by (llm, tts) config instead of by
     // benchmark-defined variant -- see that file for why it always re-extracts from the raw
@@ -399,5 +420,9 @@
     extractMetricsFromConversation,
     mergeExtracts,
     summarizeNodeStats,
+    // Exported for session/RecommendationTest.js, which runs a preset's scenarios once in
+    // text-only mode the same way a benchmark variant does, just without the TTS/LLM sweep around
+    // it.
+    runOneScenario,
   };
 })();

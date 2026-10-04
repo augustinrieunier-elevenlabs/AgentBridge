@@ -4,6 +4,7 @@
   const Tabs = window.AB.ui.Tabs;
   const SessionScreen = window.AB.ui.SessionScreen;
   const SettingsScreen = window.AB.ui.SettingsScreen;
+  const AnalyticsPanel = window.AB.ui.AnalyticsPanel;
   const HistoryPanel = window.AB.ui.HistoryPanel;
 
   function App() {
@@ -22,6 +23,7 @@
             options={[
               { value: "session", label: "Session" },
               { value: "settings", label: "Settings" },
+              { value: "analytics", label: "Analytics" },
               { value: "history", label: "History" },
             ]}
           />
@@ -29,7 +31,8 @@
         <main className="app-main">
           {tab === "session" && <SessionScreen config={config} accounts={accounts} />}
           {tab === "settings" && <SettingsScreen config={config} updateConfig={updateConfig} accounts={accounts} refreshAccounts={refreshAccounts} />}
-          {tab === "history" && <HistoryPanel config={config} />}
+          {tab === "analytics" && <AnalyticsPanel config={config} accounts={accounts} />}
+          {tab === "history" && <HistoryPanel />}
         </main>
       </div>
     );

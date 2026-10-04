@@ -183,6 +183,114 @@ def test_update_agent_model_config_sends_both_fields_when_given(one_account, mon
     assert calls[0] == {"conversation_config": {"tts": {"model_id": "eleven_v4"}, "agent": {"prompt": {"llm": "gpt-5.5"}}}}
 
 
+def test_get_agent_workflow_nodes_maps_id_to_label_and_type(one_account, monkeypatch):
+    fake_agent = {
+        "workflow": {
+            "nodes": {
+                "start_node": {"label": "start_node", "type": "start", "position": {"x": 0, "y": 0}},
+                "node_01ky2spx1hf69ad74gshkjapa6": {"label": "Transfer to human", "type": "standalone_agent", "position": {"x": 1, "y": 1}},
+            }
+        }
+    }
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, fake_agent))
+
+    nodes = eleven_api.get_agent_workflow_nodes("demo-a", "agent_123")
+
+    assert nodes == {
+        "start_node": {"label": "start_node", "type": "start"},
+        "node_01ky2spx1hf69ad74gshkjapa6": {"label": "Transfer to human", "type": "standalone_agent"},
+    }
+
+
+def test_get_agent_workflow_nodes_falls_back_to_the_id_when_a_node_has_no_label(one_account, monkeypatch):
+    fake_agent = {"workflow": {"nodes": {"node_abc": {"type": "tool"}}}}
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, fake_agent))
+
+    nodes = eleven_api.get_agent_workflow_nodes("demo-a", "agent_123")
+
+    assert nodes == {"node_abc": {"label": "node_abc", "type": "tool"}}
+
+
+def test_get_agent_workflow_nodes_defaults_to_empty_when_agent_has_no_workflow(one_account, monkeypatch):
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, {"name": "No workflow"}))
+
+    assert eleven_api.get_agent_workflow_nodes("demo-a", "agent_123") == {}
+
+
+def test_get_agent_workflow_returns_the_raw_workflow_object(one_account, monkeypatch):
+    fake_workflow = {"nodes": {"start_node": {"type": "start"}}, "edges": {}, "subgraphs": {}, "prevent_subagent_loops": True}
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, {"workflow": fake_workflow}))
+
+    assert eleven_api.get_agent_workflow("demo-a", "agent_123") == fake_workflow
+
+
+def test_get_agent_workflow_defaults_to_empty_when_agent_has_no_workflow(one_account, monkeypatch):
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, {"name": "No workflow"}))
+
+    assert eleven_api.get_agent_workflow("demo-a", "agent_123") == {}
+
+
+def test_update_agent_workflow_sends_the_whole_object_as_a_patch(one_account, monkeypatch):
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs.get("json")))
+        return FakeResponse(200, {})
+
+    monkeypatch.setattr(eleven_api.requests, "request", fake_request)
+    workflow = {"nodes": {"start_node": {"type": "start"}}, "edges": {}}
+
+    eleven_api.update_agent_workflow("demo-a", "agent_123", workflow)
+
+    assert len(calls) == 1
+    method, url, body = calls[0]
+    assert method == "PATCH"
+    assert url.endswith("/v1/convai/agents/agent_123")
+    assert body == {"workflow": workflow}
+
+
+def test_set_workflow_node_llms_reads_then_patches_only_the_targeted_node(one_account, monkeypatch):
+    fake_workflow = {
+        "nodes": {
+            "start_node": {"type": "start"},
+            "error_codes": {"type": "override_agent", "label": "Error codes", "conversation_config": {"agent": {"prompt": {"llm": None}}}},
+        },
+        "edges": {"e1": {}},
+    }
+    calls = []
+
+    def fake_request(method, url, json=None, **kwargs):
+        if method == "GET":
+            return FakeResponse(200, {"workflow": fake_workflow})
+        calls.append(("PATCH", json))
+        return FakeResponse(200, {})
+
+    monkeypatch.setattr(eleven_api.requests, "request", fake_request)
+
+    eleven_api.set_workflow_node_llms("demo-a", "agent_123", {"error_codes": "claude-sonnet-5-5"})
+
+    assert len(calls) == 1
+    patched_workflow = calls[0][1]["workflow"]
+    assert patched_workflow["nodes"]["error_codes"]["conversation_config"]["agent"]["prompt"]["llm"] == "claude-sonnet-5-5"
+    # every other node/field untouched
+    assert patched_workflow["nodes"]["start_node"] == {"type": "start"}
+    assert patched_workflow["edges"] == {"e1": {}}
+
+
+def test_set_workflow_node_llms_rejects_an_unknown_node(one_account, monkeypatch):
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, {"workflow": {"nodes": {}}}))
+
+    with pytest.raises(eleven_api.ElevenApiError, match="Unknown workflow node"):
+        eleven_api.set_workflow_node_llms("demo-a", "agent_123", {"does-not-exist": "claude-sonnet-5-5"})
+
+
+def test_set_workflow_node_llms_rejects_a_node_that_is_not_an_override_agent(one_account, monkeypatch):
+    monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: FakeResponse(200, {"workflow": {"nodes": {"start_node": {"type": "start"}}}}))
+
+    with pytest.raises(eleven_api.ElevenApiError, match="only an override_agent node"):
+        eleven_api.set_workflow_node_llms("demo-a", "agent_123", {"start_node": "claude-sonnet-5-5"})
+
+
 def test_update_agent_model_config_skips_the_request_when_nothing_is_given(one_account, monkeypatch):
     calls = []
     monkeypatch.setattr(eleven_api.requests, "request", lambda *a, **k: calls.append(1))

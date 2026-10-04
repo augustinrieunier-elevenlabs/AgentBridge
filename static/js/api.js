@@ -28,6 +28,12 @@
       listRemote: (accountId) => request(`/api/agents/${encodeURIComponent(accountId)}/remote`),
       inspect: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/inspect`),
       listLlms: (accountId) => request(`/api/agents/${encodeURIComponent(accountId)}/llms`),
+      getWorkflowNodes: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/workflow-nodes`),
+      getWorkflow: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/workflow`),
+      setWorkflow: (accountId, agentId, workflow) =>
+        request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/workflow`, { method: "POST", body: { workflow } }),
+      setWorkflowNodeLlms: (accountId, agentId, llmByNodeId) =>
+        request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/workflow/node-llm`, { method: "POST", body: { llmByNodeId } }),
       getModelConfig: (accountId, agentId) => request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/model-config`),
       setModelConfig: (accountId, agentId, cfg) =>
         request(`/api/agents/${encodeURIComponent(accountId)}/${encodeURIComponent(agentId)}/model-config`, { method: "POST", body: cfg }),
@@ -51,6 +57,7 @@
       save: (name, data) => request("/api/exports", { method: "POST", body: { name, data } }),
       list: () => request("/api/exports"),
       read: (path) => request(`/api/exports/read?path=${encodeURIComponent(path)}`),
+      update: (path, patch) => request(`/api/exports?path=${encodeURIComponent(path)}`, { method: "PATCH", body: patch }),
       clear: () => request("/api/exports", { method: "DELETE" }),
     },
     benchmarkRuns: {
