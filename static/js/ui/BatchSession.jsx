@@ -37,6 +37,7 @@
   function BatchSession({ config, accounts, preset, callerAgent, calleeAgent }) {
     const scenarios = preset.scenarioIds.map((id) => config.scenarios.find((s) => s.id === id)).filter(Boolean);
     const resolveCalleeDynamicVariables = (scenario) => window.AB.model.resolveCalleeDynamicVariables(calleeAgent, preset, scenario.id);
+    const noiseProfile = config.noiseProfiles.find((p) => p.id === preset.noiseProfileRefId) || null;
 
     const [textOnly, setTextOnly] = useState(false);
     const [phase, setPhase] = useState("idle"); // idle | checking | preflight | running
@@ -95,7 +96,7 @@
         });
         updateRun(run.id, { bridge });
         bridge
-          .start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario: run.scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(run.scenario), textOnly })
+          .start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario: run.scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(run.scenario), textOnly, noiseProfile })
           .catch((err) => updateRun(run.id, { status: "ended", endReason: `start_failed: ${err.message}` }));
       }
     }

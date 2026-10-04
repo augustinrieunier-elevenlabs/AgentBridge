@@ -1,3 +1,5 @@
+import io
+
 from services import eleven_api
 
 
@@ -38,7 +40,7 @@ def test_signed_url_rejects_unsafe_agent_id(client):
 
 
 def test_config_round_trips_through_the_api(client):
-    cfg = {"agents": [], "scenarios": [], "presets": [], "benchmarks": [], "settings": {"frame_size_ms": 100, "asr_comparison_enabled": False, "voice_table": {}}}
+    cfg = {"agents": [], "scenarios": [], "presets": [], "benchmarks": [], "noiseProfiles": [], "settings": {"frame_size_ms": 100, "asr_comparison_enabled": False, "voice_table": {}}}
     post_res = client.post("/api/config", json=cfg)
     assert post_res.status_code == 200
 
@@ -249,3 +251,30 @@ def test_debug_log_round_trips_through_the_api(client):
 
     read_res = client.get("/api/debug-logs/read", query_string={"path": path})
     assert read_res.get_json()["endReason"] == "deadlock_timeout"
+
+
+def test_noise_sound_round_trips_through_the_api(client):
+    upload_res = client.post("/api/noise-sounds", data={"file": (io.BytesIO(b"fake-mp3-bytes"), "ambient.mp3")}, content_type="multipart/form-data")
+    assert upload_res.status_code == 200
+    path = upload_res.get_json()["path"]
+
+    list_res = client.get("/api/noise-sounds")
+    assert any(e["path"] == path for e in list_res.get_json())
+
+    file_res = client.get("/api/noise-sounds/file", query_string={"path": path})
+    assert file_res.status_code == 200
+    assert file_res.data == b"fake-mp3-bytes"
+
+    del_res = client.delete("/api/noise-sounds", query_string={"path": path})
+    assert del_res.status_code == 200
+    assert client.get("/api/noise-sounds").get_json() == []
+
+
+def test_upload_noise_sound_rejects_a_non_mp3_file(client):
+    res = client.post("/api/noise-sounds", data={"file": (io.BytesIO(b"data"), "not-audio.txt")}, content_type="multipart/form-data")
+    assert res.status_code == 400
+
+
+def test_get_noise_sound_file_rejects_a_path_outside_the_sounds_directory(client):
+    res = client.get("/api/noise-sounds/file", query_string={"path": "/etc/passwd"})
+    assert res.status_code == 400

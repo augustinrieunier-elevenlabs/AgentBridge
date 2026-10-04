@@ -192,7 +192,21 @@
               ))}
             </select>
           </label>
+          <label>
+            Noise profile
+            <select value={b.noiseProfileRefId} onChange={(e) => updateBenchmark(b.id, { noiseProfileRefId: e.target.value })}>
+              <option value="">None</option>
+              {config.noiseProfiles.map((np) => (
+                <option key={np.id} value={np.id}>
+                  {np.name}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
+        {b.noiseProfileRefId && (
+          <p className="panel-help">Simulates a bad connection from the start of every run, in audio mode (ignored in text-only) -- see Settings → Noise.</p>
+        )}
 
         {calleeAgent && calleeAgent.cachedMeta && (
           <DynamicVariablesEditor

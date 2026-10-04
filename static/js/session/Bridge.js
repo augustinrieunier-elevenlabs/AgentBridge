@@ -13,6 +13,9 @@
   const isSilentFrame = window.AB.audio.isSilentFrame;
   const silenceFrame = window.AB.audio.silenceFrame;
   const MicCapture = window.AB.audio.MicCapture;
+  const NoiseInjector = window.AB.audio.NoiseInjector;
+  const PacketLossSimulator = window.AB.audio.PacketLossSimulator;
+  const AmbientSoundMixer = window.AB.audio.AmbientSoundMixer;
   const AgentSession = window.AB.session.AgentSession;
   const buildCalleeOverride = window.AB.scenario.buildCalleeOverride;
   const buildCallerOverride = window.AB.scenario.buildCallerOverride;
@@ -40,6 +43,11 @@
 
       this.callerToCalleePacer = new Pacer(100);
       this.calleeToCallerPacer = new Pacer(100);
+      // Simulates a bad phone line / noisy environment on the caller->callee leg only (confirmed
+      // with the user 2026-10-05) -- mixed in at the pacer tick, see _onCallerToCalleeTick.
+      this.callerToCalleeNoise = new NoiseInjector();
+      this.callerToCalleePacketLoss = new PacketLossSimulator();
+      this.callerToCalleeAmbient = new AmbientSoundMixer();
 
       this.textOnly = false;
       this.textOnlyReady = false; // both sessions' websockets confirmed open -- see _relayText
@@ -108,14 +116,35 @@
 
     // ---- lifecycle ---------------------------------------------------------
 
-    async start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly }) {
+    async start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile }) {
       this.textOnly = Boolean(textOnly);
       if (!this.textOnly) await this.audioBus.resume();
       this._setStatus("connecting");
 
+      // Applied immediately, before anything connects, so a referenced noise profile (see
+      // model/factory.js emptyNoiseProfile / ui/settings/NoiseProfilesPanel.jsx) is already active
+      // from the conversation's very first turn -- not something the operator has to dial in after
+      // the fact. No-op in text-only mode: there's no audio pipeline to inject noise/drops into.
+      // Still fully overridable afterwards via setCallerToCalleeNoise*/setCallerToCalleePacketLoss*
+      // (see SessionScreen.jsx's operator bar), confirmed with the user 2026-10-05.
+      let ambientLoad = Promise.resolve();
+      if (!this.textOnly && noiseProfile) {
+        this.callerToCalleeNoise.setType(noiseProfile.noiseType);
+        this.callerToCalleeNoise.setLevel(noiseProfile.noiseLevel);
+        this.callerToCalleePacketLoss.setEnabled(noiseProfile.packetLossEnabled);
+        this.callerToCalleePacketLoss.setIntervalRangeS(noiseProfile.packetLossMinS, noiseProfile.packetLossMaxS);
+        this.callerToCalleePacketLoss.setDropDurationS(noiseProfile.packetLossDropS);
+        this.callerToCalleeAmbient.setLevel(noiseProfile.ambientSoundLevel);
+        // Fetch+decode happens in parallel with the signed-url calls below, not after them -- an
+        // ambient track shouldn't add to call setup latency just because it also needs a network
+        // round trip.
+        ambientLoad = this.callerToCalleeAmbient.load(noiseProfile.ambientSoundPaths.map((p) => api.noiseSounds.fileUrl(p)));
+      }
+
       const [callerUrl, calleeUrl] = await Promise.all([
         api.session.getSignedUrl(callerAgent.accountId, callerAgent.agentId),
         api.session.getSignedUrl(calleeAgent.accountId, calleeAgent.agentId),
+        ambientLoad,
       ]);
 
       const callerOverride = buildCallerOverride(scenario);
@@ -398,6 +427,14 @@
     // ---- paced relay ticks --------------------------------------------------
 
     _onCallerToCalleeTick(frame) {
+      // Packet loss wins over noise/ambient for any frame it drops -- a lost packet carries no
+      // signal at all, not even background line noise or ambient sound, so both layers are
+      // skipped entirely on a dropped tick.
+      const dropped = this.callerToCalleePacketLoss.apply(frame);
+      if (!dropped) {
+        this.callerToCalleeNoise.apply(frame);
+        this.callerToCalleeAmbient.apply(frame);
+      }
       this.calleeSession.sendAudioFrame(frame);
       this.callerChannel.playFrame(frame);
     }
@@ -476,6 +513,22 @@
     sendContextualNudge(text) {
       this.callerSession.sendContextualUpdate(text);
       this._log("caller", `operator nudge: ${text}`);
+    }
+
+    setCallerToCalleeNoiseType(type) {
+      this.callerToCalleeNoise.setType(type);
+    }
+    setCallerToCalleeNoiseLevel(level) {
+      this.callerToCalleeNoise.setLevel(level);
+    }
+    setCallerToCalleePacketLossEnabled(enabled) {
+      this.callerToCalleePacketLoss.setEnabled(enabled);
+    }
+    setCallerToCalleePacketLossIntervalRange(minS, maxS) {
+      this.callerToCalleePacketLoss.setIntervalRangeS(minS, maxS);
+    }
+    setCallerToCalleePacketLossDropDuration(seconds) {
+      this.callerToCalleePacketLoss.setDropDurationS(seconds);
     }
 
     setCallerVolume(volume) {

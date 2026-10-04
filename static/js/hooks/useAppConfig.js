@@ -7,6 +7,7 @@
     scenarios: [],
     presets: [],
     benchmarks: [],
+    noiseProfiles: [],
     settings: { frame_size_ms: 100, asr_comparison_enabled: false, voice_table: {} },
   };
 
@@ -28,6 +29,7 @@
           scenarios: (cfg.scenarios || []).map(window.AB.model.normalizeScenario),
           presets: (cfg.presets || []).map(window.AB.model.normalizePreset),
           benchmarks: (cfg.benchmarks || []).map(window.AB.model.normalizeBenchmark),
+          noiseProfiles: (cfg.noiseProfiles || []).map(window.AB.model.normalizeNoiseProfile),
         });
         setAccounts(accs);
         setLoading(false);

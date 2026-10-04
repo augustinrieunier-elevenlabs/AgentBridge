@@ -19,6 +19,20 @@
     return body;
   }
 
+  /** Multipart upload -- separate from request() above, which always JSON-encodes its body. The
+   * browser sets the multipart boundary itself from the FormData object; setting Content-Type by
+   * hand here would omit it and break parsing on the Flask side. */
+  async function uploadFile(path, file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(path, { method: "POST", body: formData });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body.error || `Upload to ${path} failed with HTTP ${res.status}`);
+    }
+    return body;
+  }
+
   const api = {
     accounts: {
       list: () => request("/api/accounts"),
@@ -71,6 +85,14 @@
       save: (data) => request("/api/debug-logs", { method: "POST", body: data }),
       list: () => request("/api/debug-logs"),
       read: (path) => request(`/api/debug-logs/read?path=${encodeURIComponent(path)}`),
+    },
+    noiseSounds: {
+      list: () => request("/api/noise-sounds"),
+      upload: (file) => uploadFile("/api/noise-sounds", file),
+      remove: (path) => request(`/api/noise-sounds?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+      // Direct, unauthenticated-fetch URL for an <audio> element's src and for
+      // AmbientSoundMixer.js's decode -- same-origin, no API key involved (see routes/noise_sounds.py).
+      fileUrl: (path) => `/api/noise-sounds/file?path=${encodeURIComponent(path)}`,
     },
   };
 

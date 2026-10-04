@@ -14,6 +14,7 @@ def test_save_then_load_roundtrips(tmp_path):
         "scenarios": [],
         "presets": [],
         "benchmarks": [],
+        "noiseProfiles": [],
         "settings": {"frame_size_ms": 50, "asr_comparison_enabled": True, "voice_table": {"ja": "voice_123"}},
     }
     config_store.save_config(str(tmp_path), cfg)

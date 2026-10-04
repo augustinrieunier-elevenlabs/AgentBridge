@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "scenarios": [],
     "presets": [],
     "benchmarks": [],
+    "noiseProfiles": [],
     "settings": {"frame_size_ms": 100, "asr_comparison_enabled": False, "voice_table": {}},
 }
 
@@ -53,6 +54,7 @@ def load_config(instance_path):
         "scenarios": parsed.get("scenarios", []),
         "presets": parsed.get("presets", []),
         "benchmarks": parsed.get("benchmarks", []),
+        "noiseProfiles": parsed.get("noiseProfiles", []),
         "settings": settings,
     }
 

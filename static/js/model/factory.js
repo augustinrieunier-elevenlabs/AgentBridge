@@ -124,6 +124,9 @@
       // Highest precedence -- lets a batch preset send a different value (e.g. a different
       // customer record id) to the callee for each scenario it runs.
       calleeDynamicVariableOverridesByScenario: {},
+      // "" = no simulated bad connection. See emptyNoiseProfile -- ignored in text-only mode
+      // (no audio pipeline to inject noise/drops into).
+      noiseProfileRefId: "",
     };
   }
 
@@ -137,6 +140,7 @@
       ...rest,
       scenarioIds,
       calleeDynamicVariableOverridesByScenario: preset.calleeDynamicVariableOverridesByScenario || {},
+      noiseProfileRefId: preset.noiseProfileRefId || "",
     };
   }
 
@@ -207,6 +211,7 @@
       llmVariantIds: [],
       calleeDynamicVariableOverrides: {},
       calleeDynamicVariableOverridesByScenario: {},
+      noiseProfileRefId: "",
     };
   }
 
@@ -233,7 +238,49 @@
       llmVariantIds: benchmark.llmVariantIds || [],
       calleeDynamicVariableOverrides: benchmark.calleeDynamicVariableOverrides || {},
       calleeDynamicVariableOverridesByScenario: benchmark.calleeDynamicVariableOverridesByScenario || {},
+      noiseProfileRefId: benchmark.noiseProfileRefId || "",
     };
+  }
+
+  /**
+   * A reusable "bad connection" config -- background noise + packet loss, applied to the
+   * caller->callee leg only (see audio/NoiseInjector.js, audio/PacketLossSimulator.js, and
+   * session/Bridge.js's _onCallerToCalleeTick). Referenced by id from a Preset/Benchmark
+   * (noiseProfileRefId) so the same simulated line quality is applied automatically from the start
+   * of a conversation, not something the operator has to dial in by hand after connecting every
+   * time -- confirmed with the user 2026-10-05. Still fully overridable live from the Session
+   * screen's operator bar once a call is running (see SessionScreen.jsx), which is seeded FROM
+   * whichever profile the preset/benchmark referenced, if any.
+   */
+  function emptyNoiseProfile() {
+    return {
+      id: makeId("noise"),
+      name: "New noise profile",
+      noiseType: "ambient", // "ambient" | "static"
+      noiseLevel: 0, // 0-100, 0 = no background noise
+      packetLossEnabled: false,
+      packetLossMinS: 5,
+      packetLossMaxS: 15,
+      packetLossDropS: 0.2,
+      // Uploaded MP3s (see services/noise_sound_store.py -- each entry is that file's own path,
+      // same "path is the id" convention as exports/debug logs) looped and mixed in on top of the
+      // synthesized noise above -- see audio/AmbientSoundMixer.js. Empty = no ambient sound.
+      ambientSoundPaths: [],
+      ambientSoundLevel: 60, // 0-100 -- only meaningful once at least one sound is selected
+    };
+  }
+
+  /** Defensive normalization for a noise profile loaded from an older/partial config.json. */
+  function normalizeNoiseProfile(profile) {
+    const defaults = emptyNoiseProfile();
+    return {
+      ...defaults,
+      ...profile,
+    };
+  }
+
+  function cloneNoiseProfile(profile) {
+    return { ...profile, id: makeId("noise"), name: `${profile.name} (copy)` };
   }
 
   window.AB.model.makeId = makeId;
@@ -251,4 +298,7 @@
   window.AB.model.emptyBenchmark = emptyBenchmark;
   window.AB.model.cloneBenchmark = cloneBenchmark;
   window.AB.model.normalizeBenchmark = normalizeBenchmark;
+  window.AB.model.emptyNoiseProfile = emptyNoiseProfile;
+  window.AB.model.normalizeNoiseProfile = normalizeNoiseProfile;
+  window.AB.model.cloneNoiseProfile = cloneNoiseProfile;
 })();

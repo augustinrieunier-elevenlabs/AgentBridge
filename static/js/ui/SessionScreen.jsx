@@ -20,6 +20,7 @@
     const [scenarioId, setScenarioId] = useState("");
     const [presetId, setPresetId] = useState("");
     const [benchmarkId, setBenchmarkId] = useState("");
+    const [noiseProfileId, setNoiseProfileId] = useState("");
     const [textOnly, setTextOnly] = useState(false);
 
     const [status, setStatus] = useState("idle");
@@ -42,6 +43,12 @@
     const [calleeMuted, setCalleeMuted] = useState(false);
     const [callerVolume, setCallerVolume] = useState(1);
     const [calleeVolume, setCalleeVolume] = useState(1);
+    const [noiseType, setNoiseType] = useState("ambient"); // "ambient" | "static" -- caller->callee leg only
+    const [noiseLevel, setNoiseLevel] = useState(0); // 0-100, 0 = off
+    const [packetLoss, setPacketLoss] = useState(false); // caller->callee leg only
+    const [packetLossMinS, setPacketLossMinS] = useState(5);
+    const [packetLossMaxS, setPacketLossMaxS] = useState(15);
+    const [packetLossDropS, setPacketLossDropS] = useState(0.2);
     const [deadlockWarning, setDeadlockWarning] = useState(false);
     const [nudgeText, setNudgeText] = useState("");
     const [endReason, setEndReason] = useState(null);
@@ -59,6 +66,7 @@
       // A batch preset (>1 scenario) is driven entirely by BatchSession below instead of the
       // single-call scenario select.
       setScenarioId(preset.scenarioIds.length === 1 ? preset.scenarioIds[0] : "");
+      setNoiseProfileId(preset.noiseProfileRefId || "");
     }
 
     function selectBenchmark(id) {
@@ -83,6 +91,7 @@
     const activeBenchmark = config.benchmarks.find((b) => b.id === benchmarkId) || null;
     const isBenchmarkMode = Boolean(activeBenchmark);
     const calleeDynamicVariables = window.AB.model.resolveCalleeDynamicVariables(calleeAgent, activePreset, scenarioId);
+    const noiseProfile = config.noiseProfiles.find((p) => p.id === noiseProfileId) || null;
 
     async function openPreflight() {
       if (!callerAgent || !calleeAgent || !scenario) {
@@ -104,6 +113,17 @@
       setDebugLog([]);
       setEndReason(null);
 
+      // Seeds the operator bar's live noise/packet-loss controls from the referenced profile (or
+      // back to "off" if none) -- Bridge.start applies the same values to the actual audio pipeline
+      // below. Keeps the UI showing what's truly active while staying fully overridable live
+      // (confirmed with the user 2026-10-05).
+      setNoiseType(noiseProfile ? noiseProfile.noiseType : "ambient");
+      setNoiseLevel(noiseProfile ? noiseProfile.noiseLevel : 0);
+      setPacketLoss(noiseProfile ? noiseProfile.packetLossEnabled : false);
+      setPacketLossMinS(noiseProfile ? noiseProfile.packetLossMinS : 5);
+      setPacketLossMaxS(noiseProfile ? noiseProfile.packetLossMaxS : 15);
+      setPacketLossDropS(noiseProfile ? noiseProfile.packetLossDropS : 0.2);
+
       const bridge = new Bridge({
         onStatusChange: (s) => setStatus(s === "live" ? "live" : s === "ended" ? "ended" : "connecting"),
         onTranscriptUpdate: setTurns,
@@ -124,7 +144,7 @@
       bridgeRef.current = bridge;
 
       try {
-        await bridge.start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly });
+        await bridge.start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile });
         setFormats({ caller: callerAgent.cachedMeta && callerAgent.cachedMeta.output_format, callee: calleeAgent.cachedMeta && calleeAgent.cachedMeta.output_format });
       } catch (err) {
         alert(`Could not start the session: ${err.message}`);
@@ -300,6 +320,19 @@
                   </option>
                 ))}
               </select>
+              <select
+                value={noiseProfileId}
+                onChange={(e) => setNoiseProfileId(e.target.value)}
+                disabled={isLive}
+                title={textOnly ? "Ignored in text-only mode (no audio)" : "Simulates a bad connection from the start of the call -- see Settings → Noise"}
+              >
+                <option value="">No noise profile</option>
+                {config.noiseProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
               <label className="checkbox-row" title="No audio: agent_response text is relayed directly, much faster to iterate.">
                 <input type="checkbox" checked={textOnly} onChange={(e) => setTextOnly(e.target.checked)} disabled={isLive} />
                 Text only
@@ -388,6 +421,87 @@
           <button className={paused ? "active" : ""} onClick={togglePause} disabled={!isLive || textOnly} title={textOnly ? "Not available in text-only mode (no audio to mute)" : ""}>
             Pause bridge
           </button>
+          <label
+            className="noise-control"
+            title={textOnly ? "Not available in text-only mode (no audio)" : "Simulates a bad phone line / noisy environment on the caller→callee leg only"}
+          >
+            Line noise
+            <select value={noiseType} onChange={(e) => { setNoiseType(e.target.value); bridgeRef.current.setCallerToCalleeNoiseType(e.target.value); }} disabled={!isLive || textOnly}>
+              <option value="ambient">Ambient</option>
+              <option value="static">Static</option>
+            </select>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={noiseLevel}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setNoiseLevel(v);
+                bridgeRef.current.setCallerToCalleeNoiseLevel(v);
+              }}
+              disabled={!isLive || textOnly}
+            />
+          </label>
+          <label
+            className="checkbox-row"
+            title={textOnly ? "Not available in text-only mode (no audio)" : "Randomly mutes outgoing audio for the drop duration below, every random interval in the range below -- combines with Line noise above"}
+          >
+            <input
+              type="checkbox"
+              checked={packetLoss}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setPacketLoss(next);
+                bridgeRef.current.setCallerToCalleePacketLossEnabled(next);
+              }}
+              disabled={!isLive || textOnly}
+            />
+            Packet loss
+          </label>
+          <label className="noise-control" title="How often a drop happens -- a new random point within this range, every time">
+            every
+            <input
+              type="number"
+              min={0.1}
+              max={packetLossMaxS}
+              step={0.5}
+              value={packetLossMinS}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setPacketLossMinS(v);
+                bridgeRef.current.setCallerToCalleePacketLossIntervalRange(v, packetLossMaxS);
+              }}
+              disabled={!isLive || textOnly}
+            />
+            –
+            <input
+              type="number"
+              min={packetLossMinS}
+              step={0.5}
+              value={packetLossMaxS}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setPacketLossMaxS(v);
+                bridgeRef.current.setCallerToCalleePacketLossIntervalRange(packetLossMinS, v);
+              }}
+              disabled={!isLive || textOnly}
+            />
+            s, drop
+            <input
+              type="number"
+              min={0.1}
+              step={0.1}
+              value={packetLossDropS}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setPacketLossDropS(v);
+                bridgeRef.current.setCallerToCalleePacketLossDropDuration(v);
+              }}
+              disabled={!isLive || textOnly}
+            />
+            s
+          </label>
           <input placeholder="Souffler une consigne…" value={nudgeText} onChange={(e) => setNudgeText(e.target.value)} disabled={!isLive} />
           <button onClick={() => sendNudge(nudgeText)} disabled={!isLive}>
             Send

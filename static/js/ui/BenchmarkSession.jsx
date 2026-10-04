@@ -16,6 +16,7 @@
     // so it can be passed directly in the "preset" slot here (see model/factory.js emptyBenchmark).
     const resolveCalleeDynamicVariables = (scenario) => window.AB.model.resolveCalleeDynamicVariables(calleeAgent, benchmark, scenario.id);
     const variants = window.AB.session.BenchmarkRunner.buildVariantMatrix(benchmark);
+    const noiseProfile = config.noiseProfiles.find((p) => p.id === benchmark.noiseProfileRefId) || null;
 
     const [phase, setPhase] = useState("idle"); // idle | running | done | error
     const [progress, setProgress] = useState(null);
@@ -103,6 +104,7 @@
           benchmark,
           onProgress: setProgress,
           textOnly: effectiveTextOnly,
+          noiseProfile, // Bridge.js itself no-ops this in text-only mode, no need to gate it here too
         });
         setPhase("done");
         const saved = await window.AB.api.benchmarkRuns.save({

@@ -18,7 +18,7 @@ from flask import Flask, render_template
 
 load_dotenv()  # before any route/service touches services.secrets
 
-from routes import accounts, agents, benchmark_runs, config, debug_logs, exports, session  # noqa: E402  (after load_dotenv)
+from routes import accounts, agents, benchmark_runs, config, debug_logs, exports, noise_sounds, session  # noqa: E402  (after load_dotenv)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,6 +33,7 @@ def create_app(instance_path=None):
     app.register_blueprint(exports.bp)
     app.register_blueprint(benchmark_runs.bp)
     app.register_blueprint(debug_logs.bp)
+    app.register_blueprint(noise_sounds.bp)
 
     @app.get("/")
     def index():

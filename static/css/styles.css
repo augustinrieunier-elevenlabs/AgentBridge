@@ -653,6 +653,29 @@ label.grow {
   min-width: 160px;
 }
 
+.noise-control {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.noise-control input[type="range"] {
+  flex: none;
+  min-width: 90px;
+  width: 90px;
+}
+
+.noise-control input[type="number"] {
+  flex: none;
+  min-width: 52px;
+  width: 52px;
+}
+
+.noise-sound-preview {
+  height: 32px;
+  flex: none;
+}
+
 .session-end-bar {
   display: flex;
   gap: 8px;

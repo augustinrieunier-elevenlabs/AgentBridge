@@ -139,7 +139,21 @@
               ))}
             </select>
           </label>
+          <label>
+            Noise profile
+            <select value={p.noiseProfileRefId} onChange={(e) => updatePreset(p.id, { noiseProfileRefId: e.target.value })}>
+              <option value="">None</option>
+              {config.noiseProfiles.map((np) => (
+                <option key={np.id} value={np.id}>
+                  {np.name}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
+        {p.noiseProfileRefId && (
+          <p className="panel-help">Simulates a bad connection from the start of the call, in audio mode (ignored in text-only) -- see Settings → Noise. Still overridable live once a call is running.</p>
+        )}
         {calleeAgent && calleeAgent.cachedMeta && (
           <DynamicVariablesEditor
             title="Callee dynamic variables -- default for this preset"
