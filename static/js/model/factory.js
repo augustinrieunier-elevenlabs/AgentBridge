@@ -77,6 +77,51 @@
       firstSpeaker: "callee",
       openingLine: "",
       asrKeywords: [],
+      // Provenance + the source test's own dynamic_variables, for a scenario built by
+      // scenarioFromElevenLabsTest -- display-only (see ScenarioEditor.jsx), since this app has no
+      // place to AUTO-apply them (dynamic variable overrides live on a Preset, per scenario, not on
+      // the Scenario itself -- a Scenario is meant to be reusable across different callee agents
+      // with different variable needs). Left null/{} for a hand-written scenario.
+      importedFrom: null,
+      importedDynamicVariables: {},
+    };
+  }
+
+  /**
+   * Maps one ElevenLabs platform Test object (the `type: "simulation"` shape exported from the
+   * dashboard -- see Inputs/TestV3/*.json, confirmed with the user 2026-10-05) onto this app's own
+   * prompt_override Scenario formalism. Only `simulation` tests are portable at all: an `llm`/`tool`
+   * test replays a FIXED chat history and grades one model response or tool call -- there is no live
+   * two-agent call to simulate there, nothing for Agent Bridge's formalism to represent. Returns
+   * null for any other type, for the caller (ScenariosPanel.jsx) to count as skipped.
+   *
+   * Deliberately NOT ported: `tool_mock_config`/`tool_mock_overrides` (Agent Bridge runs real calls
+   * against the real agent, it has no tool-mocking layer at all) and `simulation_max_turns` (this
+   * app's scenarios are duration-based -- maxDurationSec -- not turn-count-based, and there's no
+   * reliable conversion between the two).
+   */
+  function scenarioFromElevenLabsTest(test, language) {
+    if (!test || test.type !== "simulation") return null;
+    // Looked up lazily (not destructured at the top of this file) -- model/factory.js loads before
+    // scenario/languageCatalog.js, so window.AB.scenario.findLanguage doesn't exist yet at this
+    // file's OWN load time, only once this function is actually called later, well after every
+    // script has loaded.
+    const lookupLanguage = window.AB.scenario && window.AB.scenario.findLanguage;
+    const lang = (lookupLanguage && lookupLanguage(language)) || { code: "en", name: "English" };
+    const successConditions = Array.isArray(test.success_conditions)
+      ? test.success_conditions
+      : test.success_condition
+        ? [test.success_condition]
+        : [];
+    return {
+      ...emptyPromptOverrideScenario(),
+      name: test.name || "Imported test",
+      language: lang.code,
+      languageName: lang.name,
+      promptOverride: test.simulation_scenario || "",
+      successConditions,
+      importedFrom: test.id || null,
+      importedDynamicVariables: test.dynamic_variables || {},
     };
   }
 
@@ -87,7 +132,11 @@
    */
   function normalizeScenario(scenario) {
     const kind = scenario.kind || "deterministic";
-    if (kind !== "deterministic") return { ...scenario, kind };
+    if (kind !== "deterministic") {
+      // Backfills for a prompt_override scenario saved before importedFrom/importedDynamicVariables
+      // existed (2026-10-05) -- see emptyPromptOverrideScenario.
+      return { ...scenario, kind, importedFrom: scenario.importedFrom || null, importedDynamicVariables: scenario.importedDynamicVariables || {} };
+    }
     return {
       ...scenario,
       kind,
@@ -288,6 +337,7 @@
   window.AB.model.normalizeAgentRef = normalizeAgentRef;
   window.AB.model.emptyScenario = emptyScenario;
   window.AB.model.emptyPromptOverrideScenario = emptyPromptOverrideScenario;
+  window.AB.model.scenarioFromElevenLabsTest = scenarioFromElevenLabsTest;
   window.AB.model.normalizeScenario = normalizeScenario;
   window.AB.model.cloneScenario = cloneScenario;
   window.AB.model.emptyPreset = emptyPreset;

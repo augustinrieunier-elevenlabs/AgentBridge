@@ -183,6 +183,7 @@ label.grow {
 .panel-toolbar {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .voice-table-filter {
@@ -285,6 +286,11 @@ label.grow {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* A grid item defaults to min-width:auto (sized to its content), which let a long unbreakable
+     line -- e.g. the "Import ElevenLabs test(s)..." toolbar row -- blow past this column's 240px
+     grid track and bleed into panel-detail next to it instead of wrapping. 0 lets the track's own
+     width actually constrain its contents -- the standard fix for this grid/flex overflow. */
+  min-width: 0;
 }
 
 .panel-detail {

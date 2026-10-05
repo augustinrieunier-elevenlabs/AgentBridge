@@ -328,6 +328,27 @@
           <button onClick={() => set("successConditions", [...scenario.successConditions, ""])}>+ Add condition</button>
         </fieldset>
 
+        {Object.keys(scenario.importedDynamicVariables || {}).length > 0 && (
+          <fieldset>
+            <legend>Dynamic variables from the imported test (reference only)</legend>
+            <p className="panel-help">
+              This test's own {scenario.importedFrom ? `(${scenario.importedFrom}) ` : ""}dynamic variables, for reference when wiring this scenario into a Preset -- a Scenario itself can't carry
+              callee dynamic variable overrides in this app (those live on the Preset, per scenario, since the same scenario can be reused against a different callee agent). Set them on a
+              Preset's per-scenario override once you build one using this scenario.
+            </p>
+            <table className="table">
+              <tbody>
+                {Object.entries(scenario.importedDynamicVariables || {}).map(([k, v]) => (
+                  <tr key={k}>
+                    <td>{k}</td>
+                    <td className="mono">{String(v)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </fieldset>
+        )}
+
         <div className="card-row">
           <label>
             ASR keywords (comma separated)
