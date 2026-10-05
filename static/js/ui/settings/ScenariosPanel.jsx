@@ -119,7 +119,10 @@
           <ul className="list">
             {config.scenarios.map((s) => (
               <li key={s.id} className={s.id === selectedId ? "list-item-active" : ""}>
-                <button className="list-item-btn" onClick={() => setSelectedId(s.id)}>
+                <button
+                  className={`list-item-btn ${s.kind === "prompt_override" ? "list-item-btn-override" : ""}`}
+                  onClick={() => setSelectedId(s.id)}
+                >
                   {s.name}
                   {s.kind === "prompt_override" && <span className="badge"> override</span>}
                 </button>

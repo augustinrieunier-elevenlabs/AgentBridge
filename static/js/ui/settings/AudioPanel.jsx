@@ -63,7 +63,10 @@
 
         <div className="card">
           <h3>Voice table (language → voice_id)</h3>
-          <p className="panel-help">Used to auto-fill a scenario's voice override. Find voice IDs in your ElevenLabs dashboard.</p>
+          <p className="panel-help">
+            Fallback caller TTS voice, by language -- only applies when a scenario doesn't set its own Voice ID override (Scenarios → that scenario). Find voice IDs in your
+            ElevenLabs dashboard.
+          </p>
           <input
             className="voice-table-filter"
             value={voiceFilter}

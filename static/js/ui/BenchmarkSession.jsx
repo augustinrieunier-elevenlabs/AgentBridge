@@ -5,7 +5,7 @@
  * plus every past run of this benchmark, persisted server-side, for comparison across sessions.
  */
 (function () {
-  const { useEffect, useState } = React;
+  const { useEffect, useRef, useState } = React;
   const { GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart, ResultsTables } = window.AB.ui.benchmarkViews;
 
   function BenchmarkSession({ config, accounts, benchmark }) {
@@ -30,6 +30,31 @@
     const [pendingRestore, setPendingRestore] = useState(null);
     const [restoring, setRestoring] = useState(false);
     const [nodeNames, setNodeNames] = useState({});
+    const [muted, setMuted] = useState(false);
+    // Mirrors `muted` so onBridgeCreated (called from deep inside BenchmarkRunner.js, well after
+    // this render's closure was captured) always applies the CURRENT toggle state, not whatever it
+    // was when the run started -- a benchmark runs every scenario unattended across several
+    // variants, so the user can easily toggle mute mid-run. The bridges themselves aren't kept in
+    // React state: a benchmark runs every selected scenario in parallel per variant and moves on to
+    // a fresh batch of bridges per variant, so there's nothing here worth re-rendering on.
+    const mutedRef = useRef(false);
+    const liveBridgesRef = useRef([]);
+
+    function toggleMuted() {
+      const next = !mutedRef.current;
+      mutedRef.current = next;
+      setMuted(next);
+      liveBridgesRef.current.forEach((b) => {
+        b.setCallerMuted(next);
+        b.setCalleeMuted(next);
+      });
+    }
+
+    function handleBridgeCreated(bridge) {
+      liveBridgesRef.current.push(bridge);
+      bridge.setCallerMuted(mutedRef.current);
+      bridge.setCalleeMuted(mutedRef.current);
+    }
 
     // ASR/TTS timing only exists when real audio actually ran that pipeline, so a benchmark that
     // varies TTS always needs it -- text-only is only offered (and only ever actually used) when
@@ -93,6 +118,7 @@
       setResult(null);
       setSelectedPastRunId(null);
       setDeadlockCount(0);
+      liveBridgesRef.current = [];
       try {
         const outcome = await window.AB.session.BenchmarkRunner.runBenchmark({
           api: window.AB.api,
@@ -105,6 +131,8 @@
           onProgress: setProgress,
           textOnly: effectiveTextOnly,
           noiseProfile, // Bridge.js itself no-ops this in text-only mode, no need to gate it here too
+          onBridgeCreated: handleBridgeCreated,
+          voiceTable: config.settings.voice_table,
         });
         setPhase("done");
         const saved = await window.AB.api.benchmarkRuns.save({
@@ -218,6 +246,14 @@
             <input type="checkbox" checked={effectiveTextOnly} onChange={(e) => setTextOnly(e.target.checked)} disabled={testsTts || phase === "running"} />
             Text only
           </label>
+          <button
+            className={muted ? "active" : ""}
+            onClick={toggleMuted}
+            disabled={effectiveTextOnly}
+            title={effectiveTextOnly ? "Not available in text-only mode (no audio to mute)" : "Mute every scenario's audio -- a benchmark variant dials every selected scenario in parallel, which otherwise mixes into a confusing jumble."}
+          >
+            {muted ? "Unmute" : "Mute"}
+          </button>
           <button className="primary" onClick={launch} disabled={phase === "running"}>
             {phase === "running" ? "Running…" : "Run benchmark"}
           </button>

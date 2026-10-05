@@ -144,7 +144,7 @@
       bridgeRef.current = bridge;
 
       try {
-        await bridge.start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile });
+        await bridge.start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile, voiceTable: config.settings.voice_table });
         setFormats({ caller: callerAgent.cachedMeta && callerAgent.cachedMeta.output_format, callee: calleeAgent.cachedMeta && calleeAgent.cachedMeta.output_format });
       } catch (err) {
         alert(`Could not start the session: ${err.message}`);

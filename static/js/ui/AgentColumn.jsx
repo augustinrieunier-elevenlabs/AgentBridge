@@ -22,7 +22,7 @@
         </div>
         {!textOnly && (
           <div className="vu-meter">
-            <div className="vu-meter-fill" style={{ width: `${Math.round(Math.min(1, vadScore) * 100)}%` }} />
+            <div className={`vu-meter-fill vu-meter-fill-${side}`} style={{ width: `${Math.round(Math.min(1, vadScore) * 100)}%` }} />
           </div>
         )}
         <div className="small muted">{status}</div>

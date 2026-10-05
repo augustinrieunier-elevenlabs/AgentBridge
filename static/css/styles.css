@@ -1,18 +1,56 @@
+/* ElevenLabs brand charter -- adapted from the official design system + the Agent Bridge mockup
+   (Inputs/UI mockups for test application/, confirmed with the user 2026-10-05). Two fonts:
+   KMR Waldenburg (brand display -- headings, sidebar logo) self-hosted below, Inter (body) +
+   JetBrains Mono (badges/IDs/code, matching the mockup's monospace micro-labels) via Google Fonts,
+   same CDN-not-bundled trade-off this app already makes for React/Babel -- see README "why a CDN".
+   Only Normal (400) and Halbfett (500) ship here, not the full 48-file family: those are the only
+   two weights this app's UI actually uses (headings/emphasis), and KMR Waldenburg Buch (300) --
+   the brand's own large-display weight -- is corrupted (0 bytes) in the source design-system
+   bundle, not something worth carrying 46 unused OTF files for. */
+@font-face {
+  font-family: "KMR Waldenburg";
+  src: url("../fonts/KMR-Waldenburg-Normal.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "KMR Waldenburg";
+  src: url("../fonts/KMR-Waldenburg-Halbfett.otf") format("opentype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-alt: #1f232c;
-  --border: #2a2f3a;
-  --text: #e7e9ee;
-  --muted: #8b92a3;
-  --accent: #4f8cff;
-  --ok: #3ddc84;
-  --warn: #ffb020;
-  --fail: #ff5c5c;
-  --caller: #ff9a4f;
-  --callee: #4fb4ff;
-  --operator: #c77dff;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK JP", "Noto Sans Arabic", sans-serif;
+  --bg: #fcfaf7;
+  --panel: #ffffff;
+  --panel-alt: #f5f3f1;
+  --border: #e6e2dd;
+  --border-soft: #efebe6;
+  --text: #1e1916;
+  --muted: #8a837b;
+  --muted-strong: #5a5651;
+  --accent: #1e1916;
+  --accent-foreground: #fafafa;
+  --ok: #1f6b3a;
+  --warn: #8a5b08;
+  --fail: #9a2d21;
+  --info: #244c8b;
+  --caller: #eb6834;
+  --callee: #2a78d6;
+  --operator: #8a2f72;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --shadow-md: 0 4px 12px rgba(30, 25, 22, 0.06), 0 2px 4px rgba(30, 25, 22, 0.04);
+  --shadow-lg: 0 18px 48px rgba(30, 25, 22, 0.18);
+  --font-body: "Inter", "KMR Waldenburg", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-brand: "KMR Waldenburg", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-body);
 }
 
 * {
@@ -29,11 +67,26 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
 }
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+/* ---- app shell: sidebar nav + main content, per the mockup (no top tab bar) ---- */
 
 .app {
   display: flex;
-  flex-direction: column;
   height: 100vh;
 }
 
@@ -42,53 +95,141 @@ body {
   color: var(--muted);
 }
 
-.app-header {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+.sidebar {
+  width: 208px;
+  flex: 0 0 208px;
+  border-right: 1px solid var(--border);
   background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 12px;
+  gap: 18px;
 }
 
-.app-header h1 {
-  font-size: 16px;
-  margin: 0;
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px 4px;
+}
+
+.sidebar-brand-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  flex: none;
+}
+
+.sidebar-brand-name {
+  font-family: var(--font-brand);
+  font-size: 14.5px;
+  letter-spacing: -0.01em;
+}
+
+.sidebar-brand-tag {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--muted);
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-family: var(--font-body);
+  text-align: left;
+  width: 100%;
+}
+
+.sidebar-nav-item-active {
+  background: var(--panel-alt);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.sidebar-nav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.8;
+  flex: none;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 10px;
 }
 
 .app-main {
   flex: 1;
+  min-width: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
 }
 
+/* ---- tabs: underlined sub-tab strip (Settings sub-tabs, Analytics Overview/Recommendation) ---- */
+
 .tabs {
   display: flex;
-  gap: 4px;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
 }
 
 .tab {
   background: transparent;
   border: none;
+  border-bottom: 2px solid transparent;
   color: var(--muted);
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 9px 14px;
+  border-radius: 0;
   cursor: pointer;
+  font-size: 13px;
+  margin-bottom: -1px;
 }
 
 .tab-active {
-  background: var(--panel-alt);
+  background: transparent;
   color: var(--text);
+  border-bottom-color: var(--text);
+  font-weight: 500;
 }
 
 button {
-  background: var(--panel-alt);
+  background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 13px;
 }
 
 button:disabled {
@@ -99,7 +240,8 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-foreground);
+  font-weight: 500;
 }
 
 button.danger {
@@ -109,18 +251,20 @@ button.danger {
 
 button.active {
   background: var(--accent);
-  color: white;
+  border-color: var(--accent);
+  color: var(--accent-foreground);
 }
 
 input,
 select,
 textarea {
-  background: var(--panel-alt);
+  background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 6px 8px;
-  border-radius: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
   font-size: 13px;
+  font-family: var(--font-body);
 }
 
 label {
@@ -142,7 +286,7 @@ label.grow {
 }
 
 .mono {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .muted {
@@ -319,13 +463,27 @@ label.grow {
 
 .list-item-active .list-item-btn {
   background: var(--accent);
-  color: white;
+  color: var(--accent-foreground);
+}
+
+/* Prompt-override scenarios get --info (otherwise-unused blue) instead of the neutral default,
+   so the two scenario kinds (deterministic vs. prompt-override) stay visually distinct in the list
+   regardless of selection state -- see ScenariosPanel.jsx's list-item-btn-override className. */
+.list-item-btn-override {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.list-item-active .list-item-btn.list-item-btn-override {
+  background: var(--info);
+  border-color: var(--info);
+  color: var(--accent-foreground);
 }
 
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -389,30 +547,31 @@ label.grow {
 }
 
 .badge {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
 }
 
 .badge-ok {
-  background: rgba(61, 220, 132, 0.15);
+  background: rgba(31, 107, 58, 0.1);
   color: var(--ok);
 }
 
 .badge-fail {
-  background: rgba(255, 92, 92, 0.15);
+  background: rgba(154, 45, 33, 0.1);
   color: var(--fail);
 }
 
 .badge-warn,
 .badge-latency {
-  background: rgba(255, 176, 32, 0.15);
+  background: rgba(138, 91, 8, 0.12);
   color: var(--warn);
 }
 
 .meta-box {
   background: var(--panel-alt);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px;
   font-size: 12px;
 }
@@ -421,7 +580,7 @@ label.grow {
   white-space: pre-wrap;
   background: var(--panel-alt);
   padding: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   max-height: 400px;
   overflow: auto;
@@ -429,7 +588,7 @@ label.grow {
 
 .prompt-override-textarea {
   width: 100%;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -458,14 +617,15 @@ label.grow {
 
 .status-pill {
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
   background: var(--panel-alt);
   font-size: 11px;
 }
 
 .status-pill-live {
-  background: rgba(61, 220, 132, 0.2);
-  color: var(--ok);
+  background: rgba(154, 45, 33, 0.1);
+  color: var(--fail);
+  border: 1px solid rgba(154, 45, 33, 0.28);
 }
 
 .session-body {
@@ -511,6 +671,14 @@ label.grow {
   transition: width 80ms linear;
 }
 
+.vu-meter-fill-caller {
+  background: var(--caller);
+}
+
+.vu-meter-fill-callee {
+  background: var(--callee);
+}
+
 .agent-column-controls {
   margin-top: auto;
   display: flex;
@@ -552,7 +720,7 @@ label.grow {
 .bubble {
   max-width: 70%;
   padding: 8px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   font-size: 14px;
 }
 
@@ -698,12 +866,12 @@ label.grow {
 }
 
 .banner-warn {
-  background: rgba(255, 176, 32, 0.15);
+  background: rgba(138, 91, 8, 0.12);
   color: var(--warn);
 }
 
 .banner-ok {
-  background: rgba(61, 220, 132, 0.15);
+  background: rgba(31, 107, 58, 0.1);
   color: var(--ok);
 }
 
@@ -718,31 +886,48 @@ label.grow {
 }
 
 .recommendation-top-row {
-  background: rgba(61, 220, 132, 0.08);
+  background: rgba(31, 107, 58, 0.06);
 }
 
 .ranking-table-more {
   margin-top: 6px;
 }
 
-.debug-panel {
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-}
-
+/* Debug is a slide-in drawer from the right, per the mockup -- not an inline collapsible strip.
+   .debug-toggle stays an ordinary pill button wherever SessionScreen.jsx renders it (fixed
+   positioning below escapes normal layout flow regardless of where in the tree it's mounted). */
 .debug-toggle {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
+  /* inherits the ordinary button/pill style -- no override needed */
 }
 
-.debug-panel-body {
-  padding: 8px 16px 16px;
-  max-height: 240px;
+.debug-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 70;
+}
+
+.debug-drawer {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 460px;
+  max-width: 100vw;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  padding: 18px 20px;
   overflow: auto;
+  z-index: 80;
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+.debug-drawer-header {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -760,11 +945,16 @@ label.grow {
 }
 
 .debug-panel-log {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  background: var(--panel-alt);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  max-height: 320px;
+  overflow: auto;
 }
 
 .tag {
@@ -792,7 +982,7 @@ label.grow {
 
 .modal {
   background: var(--panel);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   padding: 20px;
   width: 520px;
   max-height: 80vh;
@@ -823,7 +1013,7 @@ label.grow {
 
 fieldset {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 8px;
   display: flex;
   flex-direction: column;

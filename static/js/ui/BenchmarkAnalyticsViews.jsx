@@ -54,9 +54,9 @@
   // Matches --ok/--warn/--fail from styles.css, for a continuous coverage-ratio gradient (see
   // NodeCoverageMatrix's Total row) where the binary badge-ok/badge-warn classes aren't granular
   // enough to tell "almost full coverage" apart from "barely any" across many variant columns.
-  const OK_RGB = [61, 220, 132];
-  const WARN_RGB = [255, 176, 32];
-  const FAIL_RGB = [255, 92, 92];
+  const OK_RGB = [31, 107, 58];
+  const WARN_RGB = [138, 91, 8];
+  const FAIL_RGB = [154, 45, 33];
 
   function lerp(a, b, t) {
     return a + (b - a) * t;
@@ -320,7 +320,7 @@
                       <td key={c.variantId}>
                         <span
                           className="badge"
-                          style={{ background: coverageColor(ratio), color: "#1a1a1a" }}
+                          style={{ background: coverageColor(ratio), color: "var(--accent-foreground)" }}
                           title={`${Math.round(ratio * 100)}% of nodes visited`}
                         >
                           {c.visitedCount}/{allNodeIds.length} visited{c.lowTurnCount > 0 ? `, ${c.lowTurnCount} thin` : ""}

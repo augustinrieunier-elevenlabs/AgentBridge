@@ -52,7 +52,12 @@ def create_app(instance_path=None):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; "
-            "style-src 'self' 'unsafe-inline'; "
+            # style-src/font-src additions: the ElevenLabs brand charter (Inter + JetBrains Mono,
+            # see styles.css) loads those two from Google Fonts, same CDN-not-bundled trade-off as
+            # the React/Babel runtime above -- KMR Waldenburg itself is self-hosted (static/fonts/),
+            # no additional host needed for that one.
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data:; "
             "connect-src 'self' https://*.elevenlabs.io wss://*.elevenlabs.io; "
             "media-src 'self' blob:; "

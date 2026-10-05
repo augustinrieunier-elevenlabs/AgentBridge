@@ -116,7 +116,7 @@
 
     // ---- lifecycle ---------------------------------------------------------
 
-    async start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile }) {
+    async start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile, voiceTable }) {
       this.textOnly = Boolean(textOnly);
       if (!this.textOnly) await this.audioBus.resume();
       this._setStatus("connecting");
@@ -147,7 +147,7 @@
         ambientLoad,
       ]);
 
-      const callerOverride = buildCallerOverride(scenario);
+      const callerOverride = buildCallerOverride(scenario, voiceTable);
       let calleeOverride = buildCalleeOverride(scenario);
       const dynamicVariables = buildDynamicVariables(scenario);
 

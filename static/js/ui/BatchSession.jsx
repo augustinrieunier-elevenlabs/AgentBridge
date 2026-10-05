@@ -96,7 +96,17 @@
         });
         updateRun(run.id, { bridge });
         bridge
-          .start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario: run.scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(run.scenario), textOnly, noiseProfile })
+          .start({
+            api: window.AB.api,
+            accounts,
+            callerAgent,
+            calleeAgent,
+            scenario: run.scenario,
+            calleeDynamicVariables: resolveCalleeDynamicVariables(run.scenario),
+            textOnly,
+            noiseProfile,
+            voiceTable: config.settings.voice_table,
+          })
           .catch((err) => updateRun(run.id, { status: "ended", endReason: `start_failed: ${err.message}` }));
       }
     }

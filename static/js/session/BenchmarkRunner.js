@@ -79,7 +79,7 @@
    * varies only the LLM (no TTS variant selected), where audio brings no extra signal and
    * text-only is strictly faster/cheaper. See BenchmarkSession.jsx, which is the only caller that
    * ever passes textOnly: true, and only once it has confirmed the benchmark isn't testing TTS. */
-  function runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, onStatus, textOnly, noiseProfile }) {
+  function runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, onStatus, textOnly, noiseProfile, onBridgeCreated, voiceTable }) {
     return new Promise((resolve) => {
       let callerConversationId = null;
       let calleeConversationId = null;
@@ -116,8 +116,12 @@
         onEnded: (reason) =>
           resolve({ scenario, callerConversationId, calleeConversationId, endReason: reason, debugLog, metricsLog, startedAt, endedAt: new Date().toISOString() }),
       });
+      // Handed out before .start() so the caller (BenchmarkSession.jsx's mute toggle) can apply an
+      // already-muted state immediately -- a benchmark runs every scenario unattended and in
+      // parallel, so there's no moment where muting a freshly created bridge "late" would be safe.
+      if (onBridgeCreated) onBridgeCreated(bridge);
       bridge
-        .start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly: Boolean(textOnly), noiseProfile })
+        .start({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly: Boolean(textOnly), noiseProfile, voiceTable })
         .catch((err) =>
           resolve({
             scenario,
@@ -263,7 +267,7 @@
    * (real audio) -- BenchmarkSession.jsx only ever passes true once it has confirmed the benchmark
    * isn't testing TTS (see the top-of-file note on textOnly).
    */
-  async function runBenchmark({ api, accounts, callerAgent, calleeAgent, scenarios, resolveCalleeDynamicVariables, benchmark, onProgress, textOnly, noiseProfile }) {
+  async function runBenchmark({ api, accounts, callerAgent, calleeAgent, scenarios, resolveCalleeDynamicVariables, benchmark, onProgress, textOnly, noiseProfile, onBridgeCreated, voiceTable }) {
     const variants = buildVariantMatrix(benchmark);
     if (variants.length === 0) throw new Error("Select at least one TTS or LLM variant to benchmark.");
     if (scenarios.length === 0) throw new Error("Select at least one scenario to benchmark.");
@@ -306,7 +310,7 @@
         if (onProgress) onProgress({ phase: "running", variant, variants });
         const runs = await Promise.all(
           scenarios.map((scenario) =>
-            runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(scenario), textOnly, noiseProfile }),
+            runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(scenario), textOnly, noiseProfile, onBridgeCreated, voiceTable }),
           ),
         );
 

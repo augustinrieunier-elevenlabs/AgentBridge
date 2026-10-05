@@ -115,8 +115,11 @@ separate one from them beyond that.
 ${scenario.promptOverride}`;
   }
 
-  /** Overrides sent on the caller's websocket (spec-agent-appelant.md 7.1 + spec-agent-bridge-demo.md 6.3). */
-  function buildCallerOverride(scenario) {
+  /** Overrides sent on the caller's websocket (spec-agent-appelant.md 7.1 + spec-agent-bridge-demo.md 6.3).
+   * `voiceTable` is Settings → Audio's language -> voice_id map (config.settings.voice_table):
+   * a scenario's own voiceId always wins when set; voiceTable is only the fallback for a scenario
+   * that never had a voice explicitly chosen, keyed by the scenario's own language. */
+  function buildCallerOverride(scenario, voiceTable) {
     const override = {
       agent: {
         first_message: scenario.firstSpeaker === "caller" ? scenario.openingLine || "" : "",
@@ -124,7 +127,8 @@ ${scenario.promptOverride}`;
       },
       conversation: { max_duration_seconds: scenario.maxDurationSec },
     };
-    if (scenario.voiceId) override.tts = { voice_id: scenario.voiceId };
+    const voiceId = scenario.voiceId || (voiceTable && voiceTable[scenario.language]);
+    if (voiceId) override.tts = { voice_id: voiceId };
     if (scenario.asrKeywords.length > 0) override.asr = { keywords: scenario.asrKeywords };
     if (scenario.kind === "prompt_override") {
       override.agent = Object.assign({}, override.agent, { prompt: { prompt: buildPromptOverrideText(scenario) } });
