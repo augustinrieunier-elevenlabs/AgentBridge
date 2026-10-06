@@ -22,6 +22,12 @@
     const [benchmarkId, setBenchmarkId] = useState("");
     const [noiseProfileId, setNoiseProfileId] = useState("");
     const [textOnly, setTextOnly] = useState(false);
+    const [runCount, setRunCount] = useState(1);
+    const [runProgress, setRunProgress] = useState(null); // { current, total } while a multi-run sequence is going
+    // True for the entire multi-run sequence, not just while a call is live -- status itself
+    // briefly goes back to "ended" between two runs, which would otherwise flash the Launch button
+    // back on and let a second sequence start concurrently with the first.
+    const [sequencing, setSequencing] = useState(false);
 
     const [status, setStatus] = useState("idle");
     const [checks, setChecks] = useState([]);
@@ -55,6 +61,12 @@
 
     const bridgeRef = useRef(null);
     const historySavedRef = useRef(false);
+    const cancelRunsRef = useRef(false);
+    // "{i}/{total}" for the in-progress run, or null outside a multi-run sequence -- read
+    // synchronously by the History-saving effect below (a ref, not state, so there's no risk of
+    // its update batching against the "ended" status update from the same onEnded callback and
+    // being read one run late).
+    const runLabelRef = useRef(null);
 
     function applyPreset(id) {
       setBenchmarkId(""); // mutually exclusive -- a benchmark drives its own caller/callee/scenarios
@@ -105,54 +117,87 @@
       setStatus("idle");
     }
 
+    /** Runs the selected scenario once, end to end, resolving once the call has actually ended
+     * (not just connected) -- this is what lets launch() below sequence several runs one after
+     * another instead of overlapping them. */
+    function runSingleCall() {
+      return new Promise((resolve) => {
+        setStatus("connecting");
+        setTurns([]);
+        setDebugLog([]);
+        setEndReason(null);
+
+        // Seeds the operator bar's live noise/packet-loss controls from the referenced profile (or
+        // back to "off" if none) -- Bridge.start applies the same values to the actual audio pipeline
+        // below. Keeps the UI showing what's truly active while staying fully overridable live
+        // (confirmed with the user 2026-10-05).
+        setNoiseType(noiseProfile ? noiseProfile.noiseType : "ambient");
+        setNoiseLevel(noiseProfile ? noiseProfile.noiseLevel : 0);
+        setPacketLoss(noiseProfile ? noiseProfile.packetLossEnabled : false);
+        setPacketLossMinS(noiseProfile ? noiseProfile.packetLossMinS : 5);
+        setPacketLossMaxS(noiseProfile ? noiseProfile.packetLossMaxS : 15);
+        setPacketLossDropS(noiseProfile ? noiseProfile.packetLossDropS : 0.2);
+
+        const bridge = new Bridge({
+          onStatusChange: (s) => setStatus(s === "live" ? "live" : s === "ended" ? "ended" : "connecting"),
+          onTranscriptUpdate: setTurns,
+          onDebugLog: (entry) => setDebugLog((prev) => [...prev.slice(-500), entry]),
+          onMetrics: (m) => {
+            setElapsedMs(m.elapsedSec * 1000);
+            setLatency({ avgMs: m.calleeLatencyAvgMs, maxMs: m.calleeLatencyMaxMs });
+            setQueueDepths({ callerQueueMs: m.callerQueueMs, calleeQueueMs: m.calleeQueueMs });
+          },
+          onEnded: (reason) => {
+            setEndReason(reason);
+            setStatus("ended");
+            resolve();
+          },
+          onDeadlock: () => setDeadlockWarning(true),
+          onConversationIds: (callerId, calleeId) => setConversationIds({ caller: callerId, callee: calleeId }),
+          onVadScore: (agent, score) => setVad((prev) => ({ ...prev, [agent]: score })),
+        });
+        bridgeRef.current = bridge;
+
+        bridge
+          .start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile, voiceTable: config.settings.voice_table })
+          .then(() => {
+            setFormats({ caller: callerAgent.cachedMeta && callerAgent.cachedMeta.output_format, callee: calleeAgent.cachedMeta && calleeAgent.cachedMeta.output_format });
+          })
+          .catch((err) => {
+            alert(`Could not start the session: ${err.message}`);
+            setStatus("idle");
+            resolve(); // must still resolve, or a failed run would hang the rest of the sequence forever
+          });
+      });
+    }
+
+    /** Runs the selected scenario `runCount` times in a row (the Run dropdown next to Launch) --
+     * each pass is a fully independent call, auto-saved to History same as a single run (see the
+     * status==="ended" effect below). A manual "Hang up" during the sequence cancels the remaining
+     * runs too, not just the current one -- an operator stepping in almost certainly wants the
+     * whole unattended sequence stopped, not to silently skip ahead to the next pass. */
     async function launch() {
       if (!callerAgent || !calleeAgent || !scenario) return;
       setShowPreflight(false);
-      setStatus("connecting");
-      setTurns([]);
-      setDebugLog([]);
-      setEndReason(null);
-
-      // Seeds the operator bar's live noise/packet-loss controls from the referenced profile (or
-      // back to "off" if none) -- Bridge.start applies the same values to the actual audio pipeline
-      // below. Keeps the UI showing what's truly active while staying fully overridable live
-      // (confirmed with the user 2026-10-05).
-      setNoiseType(noiseProfile ? noiseProfile.noiseType : "ambient");
-      setNoiseLevel(noiseProfile ? noiseProfile.noiseLevel : 0);
-      setPacketLoss(noiseProfile ? noiseProfile.packetLossEnabled : false);
-      setPacketLossMinS(noiseProfile ? noiseProfile.packetLossMinS : 5);
-      setPacketLossMaxS(noiseProfile ? noiseProfile.packetLossMaxS : 15);
-      setPacketLossDropS(noiseProfile ? noiseProfile.packetLossDropS : 0.2);
-
-      const bridge = new Bridge({
-        onStatusChange: (s) => setStatus(s === "live" ? "live" : s === "ended" ? "ended" : "connecting"),
-        onTranscriptUpdate: setTurns,
-        onDebugLog: (entry) => setDebugLog((prev) => [...prev.slice(-500), entry]),
-        onMetrics: (m) => {
-          setElapsedMs(m.elapsedSec * 1000);
-          setLatency({ avgMs: m.calleeLatencyAvgMs, maxMs: m.calleeLatencyMaxMs });
-          setQueueDepths({ callerQueueMs: m.callerQueueMs, calleeQueueMs: m.calleeQueueMs });
-        },
-        onEnded: (reason) => {
-          setEndReason(reason);
-          setStatus("ended");
-        },
-        onDeadlock: () => setDeadlockWarning(true),
-        onConversationIds: (callerId, calleeId) => setConversationIds({ caller: callerId, callee: calleeId }),
-        onVadScore: (agent, score) => setVad((prev) => ({ ...prev, [agent]: score })),
-      });
-      bridgeRef.current = bridge;
-
+      cancelRunsRef.current = false;
+      setSequencing(true);
+      const total = runCount;
       try {
-        await bridge.start({ api: window.AB.api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables, textOnly, noiseProfile, voiceTable: config.settings.voice_table });
-        setFormats({ caller: callerAgent.cachedMeta && callerAgent.cachedMeta.output_format, callee: calleeAgent.cachedMeta && calleeAgent.cachedMeta.output_format });
-      } catch (err) {
-        alert(`Could not start the session: ${err.message}`);
-        setStatus("idle");
+        for (let i = 1; i <= total; i++) {
+          if (cancelRunsRef.current) break;
+          runLabelRef.current = total > 1 ? `${i}/${total}` : null;
+          setRunProgress(total > 1 ? { current: i, total } : null);
+          await runSingleCall();
+        }
+      } finally {
+        runLabelRef.current = null;
+        setRunProgress(null);
+        setSequencing(false);
       }
     }
 
     function hangUp() {
+      cancelRunsRef.current = true;
       if (bridgeRef.current) bridgeRef.current.end("operator_hangup");
     }
 
@@ -175,7 +220,7 @@
       historySavedRef.current = true;
       window.AB.session.RunHistory.saveRunHistory({
         runType: "session",
-        title: scenario.name,
+        title: runLabelRef.current ? `${scenario.name} (run ${runLabelRef.current})` : scenario.name,
         callerAgent,
         calleeAgent,
         conversations: [
@@ -277,7 +322,7 @@
         )}
 
         <div className="session-toolbar">
-          <select value={presetId} onChange={(e) => applyPreset(e.target.value)} disabled={isLive || isBenchmarkMode}>
+          <select value={presetId} onChange={(e) => applyPreset(e.target.value)} disabled={isLive || sequencing || isBenchmarkMode}>
             <option value="">Select a preset…</option>
             {config.presets.map((p) => (
               <option key={p.id} value={p.id}>
@@ -286,7 +331,7 @@
               </option>
             ))}
           </select>
-          <select value={benchmarkId} onChange={(e) => selectBenchmark(e.target.value)} disabled={isLive}>
+          <select value={benchmarkId} onChange={(e) => selectBenchmark(e.target.value)} disabled={isLive || sequencing}>
             <option value="">Select a benchmark…</option>
             {config.benchmarks.map((b) => (
               <option key={b.id} value={b.id}>
@@ -296,7 +341,7 @@
           </select>
           {!isBenchmarkMode && !isBatchPreset && (
             <>
-              <select value={callerAgentId} onChange={(e) => setCallerAgentId(e.target.value)} disabled={isLive}>
+              <select value={callerAgentId} onChange={(e) => setCallerAgentId(e.target.value)} disabled={isLive || sequencing}>
                 <option value="">Caller agent…</option>
                 {callerCandidates.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -304,7 +349,7 @@
                   </option>
                 ))}
               </select>
-              <select value={calleeAgentId} onChange={(e) => setCalleeAgentId(e.target.value)} disabled={isLive}>
+              <select value={calleeAgentId} onChange={(e) => setCalleeAgentId(e.target.value)} disabled={isLive || sequencing}>
                 <option value="">Callee agent…</option>
                 {calleeCandidates.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -312,7 +357,7 @@
                   </option>
                 ))}
               </select>
-              <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={isLive}>
+              <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={isLive || sequencing}>
                 <option value="">Scenario…</option>
                 {config.scenarios.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -323,7 +368,7 @@
               <select
                 value={noiseProfileId}
                 onChange={(e) => setNoiseProfileId(e.target.value)}
-                disabled={isLive}
+                disabled={isLive || sequencing}
                 title={textOnly ? "Ignored in text-only mode (no audio)" : "Simulates a bad connection from the start of the call -- see Settings → Noise"}
               >
                 <option value="">No noise profile</option>
@@ -334,18 +379,33 @@
                 ))}
               </select>
               <label className="checkbox-row" title="No audio: agent_response text is relayed directly, much faster to iterate.">
-                <input type="checkbox" checked={textOnly} onChange={(e) => setTextOnly(e.target.checked)} disabled={isLive} />
+                <input type="checkbox" checked={textOnly} onChange={(e) => setTextOnly(e.target.checked)} disabled={isLive || sequencing} />
                 Text only
               </label>
               <span className="timer mono">{formatElapsed(elapsedMs)}</span>
               <span className={`status-pill status-pill-${status}`}>{status}</span>
-              {!isLive && status !== "connecting" && (
+              {runProgress && (
+                <span className="muted small" title="This scenario is set to repeat several times in a row -- see the Run dropdown">
+                  Run {runProgress.current}/{runProgress.total}
+                </span>
+              )}
+              <label className="checkbox-row" title="Runs this scenario this many times in a row, automatically moving to the next run as soon as the previous one ends.">
+                Run
+                <select value={runCount} onChange={(e) => setRunCount(Number(e.target.value))} disabled={isLive || sequencing}>
+                  {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {!isLive && status !== "connecting" && !sequencing && (
                 <button className="primary" onClick={openPreflight}>
                   Launch
                 </button>
               )}
-              {(isLive || status === "connecting") && (
-                <button className="danger" onClick={hangUp}>
+              {(isLive || status === "connecting" || sequencing) && (
+                <button className="danger" onClick={hangUp} title={runProgress ? "Also cancels the remaining runs in this sequence" : undefined}>
                   Hang up
                 </button>
               )}
