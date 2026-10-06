@@ -21,7 +21,7 @@
  * demo-scale history; worth revisiting (persist once per conversation) only if this gets slow.
  */
 (function () {
-  const { fetchConversationWithMetrics, extractMetricsFromConversation, mergeExtracts, summarizeNodeStats, computeMinMaxAvg, combineNodeStats, NORMAL_END_REASONS } =
+  const { fetchConversationWithMetrics, extractMetricsFromConversation, mergeExtracts, summarizeNodeStats, summarizeConversationStats, computeMinMaxAvg, combineNodeStats, NORMAL_END_REASONS } =
     window.AB.session.BenchmarkRunner;
 
   function configKey(cfg) {
@@ -196,6 +196,7 @@
         ttsModelId: group.cfg ? group.cfg.tts_model_id || null : null,
         asr: computeMinMaxAvg(merged.asrTimes),
         perNode: summarizeNodeStats(merged.perNode),
+        conversationStats: summarizeConversationStats(merged),
         scenarioRuns: group.entries,
       });
     }
@@ -215,6 +216,19 @@
     if (!b) return a;
     const n = a.n + b.n;
     return { min: Math.min(a.min, b.min), max: Math.max(a.max, b.max), avg: (a.avg * a.n + b.avg * b.n) / n, n };
+  }
+
+  /** Pools several variants' {turnCount, durationSecs, totalTokens} conversation-level stats into
+   * one, field by field, via mergeStat -- the conversation-level counterpart to mergePerNode below. */
+  function mergeConversationStats(statsList) {
+    const merged = { turnCount: null, durationSecs: null, totalTokens: null };
+    for (const stats of statsList) {
+      if (!stats) continue;
+      merged.turnCount = mergeStat(merged.turnCount, stats.turnCount);
+      merged.durationSecs = mergeStat(merged.durationSecs, stats.durationSecs);
+      merged.totalTokens = mergeStat(merged.totalTokens, stats.totalTokens);
+    }
+    return merged;
   }
 
   function mergePerNode(perNodeList) {
@@ -261,6 +275,7 @@
       label: group.label,
       asr: group.variants.map((v) => v.asr).reduce((acc, s) => mergeStat(acc, s), null),
       perNode: mergePerNode(group.variants.map((v) => v.perNode)),
+      conversationStats: mergeConversationStats(group.variants.map((v) => v.conversationStats)),
       scenarioRuns: group.variants.flatMap((v) => v.scenarioRuns),
     }));
     grouped.sort((a, b) => a.label.localeCompare(b.label));
@@ -366,7 +381,15 @@
         const perNode = mergePerNode(vs.map((v) => v.perNode));
         const hangup = hangupRate(vs.flatMap((v) => v.scenarioRuns || []));
         const coverage = coverageOf(perNode, allNodeIds);
-        return { id: ttsModelId, hangupRate: hangup, coverage, reliability: reliabilityOf(hangup, coverage), latency: combineNodeStats(perNode, "tts"), sampleCount: vs.length };
+        return {
+          id: ttsModelId,
+          hangupRate: hangup,
+          coverage,
+          reliability: reliabilityOf(hangup, coverage),
+          latency: combineNodeStats(perNode, "tts"),
+          conversationStats: mergeConversationStats(vs.map((v) => v.conversationStats)),
+          sampleCount: vs.length,
+        };
       }),
     );
 
@@ -376,7 +399,15 @@
         const perNode = mergePerNode(vs.map((v) => v.perNode));
         const hangup = hangupRate(vs.flatMap((v) => v.scenarioRuns || []));
         const coverage = coverageOf(perNode, allNodeIds);
-        return { id: llm, hangupRate: hangup, coverage, reliability: reliabilityOf(hangup, coverage), latency: combineNodeStats(perNode, "llm"), sampleCount: vs.length };
+        return {
+          id: llm,
+          hangupRate: hangup,
+          coverage,
+          reliability: reliabilityOf(hangup, coverage),
+          latency: combineNodeStats(perNode, "llm"),
+          conversationStats: mergeConversationStats(vs.map((v) => v.conversationStats)),
+          sampleCount: vs.length,
+        };
       }),
     );
     const llmHangupRate = new Map(llmRanking.map((c) => [c.id, c.hangupRate]));

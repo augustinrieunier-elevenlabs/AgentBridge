@@ -152,6 +152,28 @@
     return raw;
   }
 
+  /** Sums every model's committed (not retried/discarded) token usage for the whole conversation,
+   * straight from the platform's own billing aggregate (metadata.charging.llm_usage) -- not
+   * recomputed by summing each turn's own llm_usage, which would double as much code for the same
+   * number the platform already computed once, authoritatively. `irreversible_generation` (not
+   * `initiated_generation`) specifically to count tokens that were actually kept, not ones a retried
+   * generation discarded -- the honest "what did this conversation actually cost" figure. Null (not
+   * 0) when the conversation never recorded this at all, so it reads as "unknown" rather than "zero
+   * tokens used" in computeMinMaxAvg/StatCell. */
+  function sumConversationTokens(raw) {
+    const modelUsage = raw.metadata && raw.metadata.charging && raw.metadata.charging.llm_usage && raw.metadata.charging.llm_usage.irreversible_generation
+      && raw.metadata.charging.llm_usage.irreversible_generation.model_usage;
+    if (!modelUsage) return null;
+    let total = 0;
+    for (const usage of Object.values(modelUsage)) {
+      total += (usage.input && usage.input.tokens) || 0;
+      total += (usage.input_cache_read && usage.input_cache_read.tokens) || 0;
+      total += (usage.input_cache_write && usage.input_cache_write.tokens) || 0;
+      total += (usage.output_total && usage.output_total.tokens) || 0;
+    }
+    return total;
+  }
+
   function extractMetricsFromConversation(raw) {
     const asrTimes = [];
     const perNode = {};
@@ -185,15 +207,29 @@
       if (rag && typeof rag.rag_latency_secs === "number") perNode[nodeId].ragLatency.push(rag.rag_latency_secs);
     }
 
-    return { asrTimes, perNode };
+    // Conversation-level (not per-node) signals of a model's efficiency/verbosity, confirmed with
+    // the user 2026-10-06: a model that needs more back-and-forth or more tokens to get through the
+    // same scenario is a real finding, independent of (and often a leading indicator for) its raw
+    // latency numbers above. turnCount counts "agent" role turns the same way perNode does, just
+    // without grouping by node -- the whole conversation's total, not per-node.
+    const turnCount = (raw.transcript || []).filter((t) => t.role === "agent").length;
+    const durationSecs = raw.metadata && typeof raw.metadata.call_duration_secs === "number" ? raw.metadata.call_duration_secs : null;
+    const totalTokens = raw.metadata ? sumConversationTokens(raw) : null;
+
+    return { asrTimes, perNode, turnCount, durationSecs, totalTokens };
   }
 
   /** Combines the per-scenario extracts of one variant into one set of samples per node --
    * running N scenarios against the same variant gives more samples per node than a single pass,
-   * even though the spec only asks for one pass per scenario per variant. */
+   * even though the spec only asks for one pass per scenario per variant. turnCounts/durationsSecs/
+   * totalTokensList are one entry per CONVERSATION (not per-turn, unlike asrTimes) -- exactly what
+   * computeMinMaxAvg expects to turn into a {min,max,avg,n} stat at the call site. */
   function mergeExtracts(extracts) {
     const asrTimes = [];
     const perNode = {};
+    const turnCounts = [];
+    const durationsSecs = [];
+    const totalTokensList = [];
     for (const e of extracts) {
       asrTimes.push(...e.asrTimes);
       for (const [nodeId, stats] of Object.entries(e.perNode)) {
@@ -203,8 +239,23 @@
         perNode[nodeId].ttsTtfb.push(...stats.ttsTtfb);
         perNode[nodeId].ragLatency.push(...stats.ragLatency);
       }
+      if (typeof e.turnCount === "number") turnCounts.push(e.turnCount);
+      if (typeof e.durationSecs === "number") durationsSecs.push(e.durationSecs);
+      if (typeof e.totalTokens === "number") totalTokensList.push(e.totalTokens);
     }
-    return { asrTimes, perNode };
+    return { asrTimes, perNode, turnCounts, durationsSecs, totalTokensList };
+  }
+
+  /** {turnCount, durationSecs, totalTokens} each as a computeMinMaxAvg {min,max,avg,n} stat (or null
+   * if nothing was recorded) -- the conversation-level counterpart to summarizeNodeStats, built the
+   * same way at every call site that builds a variant result (runBenchmark, refreshRunStats,
+   * GlobalAnalytics.computeGlobalAnalytics), so all three stay in sync by construction. */
+  function summarizeConversationStats(merged) {
+    return {
+      turnCount: computeMinMaxAvg(merged.turnCounts),
+      durationSecs: computeMinMaxAvg(merged.durationsSecs),
+      totalTokens: computeMinMaxAvg(merged.totalTokensList),
+    };
   }
 
   function computeMinMaxAvg(values) {
@@ -260,14 +311,54 @@
   }
 
   /**
-   * Runs the whole benchmark: snapshot -> for each variant (sequential, since they all mutate the
-   * same live callee agent) apply it, run every scenario in parallel, collect + aggregate -> restore
-   * the snapshot. `onProgress({ phase, variant, variants })` fires at each step for the UI
-   * (phase: "applying" | "running" | "collecting" | "restoring"). `textOnly` defaults to falsy
-   * (real audio) -- BenchmarkSession.jsx only ever passes true once it has confirmed the benchmark
-   * isn't testing TTS (see the top-of-file note on textOnly).
+   * Runs the whole benchmark: snapshot -> validate every distinct llm against the agent -> for each
+   * RUNNABLE variant (sequential, since they all mutate the same live callee agent) apply it, run
+   * every scenario in parallel, collect + aggregate -> restore the snapshot.
+   * `onProgress({ phase, variant, variants })` fires at each step for the UI (phase: "validating" |
+   * "applying" | "running" | "collecting" | "restoring"). `textOnly` defaults to falsy (real audio)
+   * -- BenchmarkSession.jsx only ever passes true once it has confirmed the benchmark isn't testing
+   * TTS (see the top-of-file note on textOnly).
+   *
+   * `runsPerScenario` (default 1, BenchmarkSession.jsx's "Run" dropdown) replays each selected
+   * scenario that many times WITHIN the same variant pass, all run in parallel alongside each
+   * other -- same concurrency model as running several different scenarios at once, just with
+   * duplicates of the same one. This is purely about collecting more samples per node before
+   * moving on to the next variant (a single noisy/short call shouldn't carry a whole variant's
+   * stats) -- `perNode`'s merge already treats multiple runs of one scenario exactly like runs of
+   * different scenarios (see mergeExtracts), so no aggregation changes were needed for this.
+   *
+   * The resolved result carries two failure lists, both non-fatal to the rest of the run:
+   * `invalidLlms` ({llm, error}[]) for an llm the pre-run validation rejected (its variants never
+   * ran at all), and `failedVariants` ({variantId, label, error}[]) for a variant that passed
+   * validation but still failed once the sweep reached it. Either one failing no longer discards
+   * variants that already succeeded -- only throws (aborting the whole run) when EVERY variant
+   * turns out unrunnable.
+   *
+   * `skipVariantIds` (BenchmarkSession.jsx's "Continue" button on an interrupted past run) excludes
+   * already-completed variant ids from this sweep entirely -- not re-validated, not re-applied, not
+   * re-dialed. `onVariantDone({variants, failedVariants, invalidLlms, nodeNames})` fires after EVERY
+   * variant this call does run (success or failure), each time with the FULL cumulative state so
+   * far (not just that one variant) -- BenchmarkSession.jsx uses it to persist progress to the
+   * backend incrementally, so a browser crash or an interruption mid-sweep loses at most the ONE
+   * variant that was in flight, not everything collected before it.
    */
-  async function runBenchmark({ api, accounts, callerAgent, calleeAgent, scenarios, resolveCalleeDynamicVariables, benchmark, onProgress, textOnly, noiseProfile, onBridgeCreated, voiceTable }) {
+  async function runBenchmark({
+    api,
+    accounts,
+    callerAgent,
+    calleeAgent,
+    scenarios,
+    resolveCalleeDynamicVariables,
+    benchmark,
+    onProgress,
+    textOnly,
+    noiseProfile,
+    onBridgeCreated,
+    voiceTable,
+    runsPerScenario,
+    skipVariantIds,
+    onVariantDone,
+  }) {
     const variants = buildVariantMatrix(benchmark);
     if (variants.length === 0) throw new Error("Select at least one TTS or LLM variant to benchmark.");
     if (scenarios.length === 0) throw new Error("Select at least one scenario to benchmark.");
@@ -296,84 +387,144 @@
     // "model-config"` lets session/PendingRestore.js tell this apart from a
     // RecommendationTest.js Workflow snapshot -- same per-agent record, two possible shapes.
     await api.agents.savePendingRestore(calleeAgent.accountId, calleeAgent.agentId, { ...snapshot, kind: "model-config" });
+
+    // Every DISTINCT llm this run would apply is validated against the callee agent BEFORE dialing
+    // any real calls, by making the exact same setModelConfig call the sweep below makes for it.
+    // Settings → Benchmarks' model picker only filters by the platform's general catalog
+    // (services/eleven_api.py get_llm_list) -- a model listed there as selectable can still be
+    // rejected by THIS agent/workflow at apply time (seen 2026-10-06: a 400 "<model> is not yet
+    // supported" for agent.prompt.llm). Checked once per distinct llm, not once per variant, since
+    // several variants can share one crossed with different TTS ids. A variant whose llm fails this
+    // check is dropped from the sweep entirely -- surfaced back as `invalidLlms` so the UI can tell
+    // the user what got skipped and why, instead of the whole run aborting (and, before this
+    // existed, silently discarding every variant already completed) the moment the sweep itself
+    // first reached that llm.
+    const skipIds = new Set(skipVariantIds || []);
+    const toValidate = variants.filter((v) => !skipIds.has(v.id));
+    const distinctLlms = [...new Set(toValidate.map((v) => v.llm).filter(Boolean))];
+    const invalidLlms = [];
+    if (distinctLlms.length > 0) {
+      if (onProgress) onProgress({ phase: "validating", variants: toValidate });
+      for (const llm of distinctLlms) {
+        try {
+          await api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, { llm });
+        } catch (err) {
+          invalidLlms.push({ llm, error: err.message });
+        }
+      }
+    }
+    const invalidLlmNames = new Set(invalidLlms.map((e) => e.llm));
+    const runnableVariants = toValidate.filter((v) => !v.llm || !invalidLlmNames.has(v.llm));
+    if (runnableVariants.length === 0) {
+      await api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, snapshot);
+      await api.agents.clearPendingRestore(calleeAgent.accountId, calleeAgent.agentId);
+      if (toValidate.length === 0) {
+        // Every variant was already completed in a previous attempt (resumed via skipVariantIds) --
+        // nothing left to do, not a failure.
+        return { snapshot, variants: [], nodeNames, invalidLlms, failedVariants: [] };
+      }
+      throw new Error(`None of the selected LLM variant(s) are valid for this agent: ${invalidLlms.map((e) => `${e.llm} (${e.error})`).join("; ")}`);
+    }
+
     const variantResults = [];
+    const failedVariants = [];
 
     try {
-      for (const variant of variants) {
-        if (onProgress) onProgress({ phase: "applying", variant, variants });
-        await api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, {
-          tts_model_id: variant.ttsModelId || undefined,
-          llm: variant.llm || undefined,
-        });
-        await sleep(1500); // let the new config settle before dialing
+      for (const variant of runnableVariants) {
+        // A variant that fails AFTER passing the validation above (a transient error, or the
+        // agent's state changing between validation and here) is recorded and skipped, not left to
+        // abort the whole run -- every other variant's already-collected results must survive it.
+        try {
+          if (onProgress) onProgress({ phase: "applying", variant, variants: runnableVariants });
+          await api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, {
+            tts_model_id: variant.ttsModelId || undefined,
+            llm: variant.llm || undefined,
+          });
+          await sleep(1500); // let the new config settle before dialing
 
-        if (onProgress) onProgress({ phase: "running", variant, variants });
-        const runs = await Promise.all(
-          scenarios.map((scenario) =>
-            runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(scenario), textOnly, noiseProfile, onBridgeCreated, voiceTable }),
-          ),
-        );
+          if (onProgress) onProgress({ phase: "running", variant, variants: runnableVariants });
+          const repeats = Math.max(1, runsPerScenario || 1);
+          const runs = await Promise.all(
+            scenarios.flatMap((scenario) =>
+              Array.from({ length: repeats }, () =>
+                runOneScenario({ api, accounts, callerAgent, calleeAgent, scenario, calleeDynamicVariables: resolveCalleeDynamicVariables(scenario), textOnly, noiseProfile, onBridgeCreated, voiceTable }),
+              ),
+            ),
+          );
 
-        // Persist full debug telemetry for EVERY run in this variant, regardless of outcome, before
-        // doing anything else with the results -- the only way to diagnose a mid-call cutoff after
-        // the fact (2026-10-04 incident: audio benchmark calls cutting off mid-conversation with
-        // nothing anywhere to explain why). Best-effort: a failed save here must never abort the
-        // benchmark itself, the run's actual results matter more than its own debug trail.
-        await Promise.all(
-          runs.map((r) =>
-            api.debugLogs
-              .save({
-                benchmarkId: benchmark.id,
-                benchmarkName: benchmark.name,
-                variantId: variant.id,
-                variantLabel: variant.label,
-                scenarioId: r.scenario.id,
-                scenarioName: r.scenario.name,
-                textOnly: Boolean(textOnly),
-                callerAccountId: callerAgent.accountId,
-                callerAgentId: callerAgent.agentId,
-                calleeAccountId: calleeAgent.accountId,
-                calleeAgentId: calleeAgent.agentId,
-                callerConversationId: r.callerConversationId,
-                calleeConversationId: r.calleeConversationId,
-                endReason: r.endReason,
-                startedAt: r.startedAt,
-                endedAt: r.endedAt,
-                debugLog: r.debugLog,
-                metricsLog: r.metricsLog,
-              })
-              .catch((err) => console.error("Failed to save debug log for scenario run", r.scenario.name, err)),
-          ),
-        );
+          // Persist full debug telemetry for EVERY run in this variant, regardless of outcome, before
+          // doing anything else with the results -- the only way to diagnose a mid-call cutoff after
+          // the fact (2026-10-04 incident: audio benchmark calls cutting off mid-conversation with
+          // nothing anywhere to explain why). Best-effort: a failed save here must never abort the
+          // benchmark itself, the run's actual results matter more than its own debug trail.
+          await Promise.all(
+            runs.map((r) =>
+              api.debugLogs
+                .save({
+                  benchmarkId: benchmark.id,
+                  benchmarkName: benchmark.name,
+                  variantId: variant.id,
+                  variantLabel: variant.label,
+                  scenarioId: r.scenario.id,
+                  scenarioName: r.scenario.name,
+                  textOnly: Boolean(textOnly),
+                  callerAccountId: callerAgent.accountId,
+                  callerAgentId: callerAgent.agentId,
+                  calleeAccountId: calleeAgent.accountId,
+                  calleeAgentId: calleeAgent.agentId,
+                  callerConversationId: r.callerConversationId,
+                  calleeConversationId: r.calleeConversationId,
+                  endReason: r.endReason,
+                  startedAt: r.startedAt,
+                  endedAt: r.endedAt,
+                  debugLog: r.debugLog,
+                  metricsLog: r.metricsLog,
+                })
+                .catch((err) => console.error("Failed to save debug log for scenario run", r.scenario.name, err)),
+            ),
+          );
 
-        if (onProgress) onProgress({ phase: "collecting", variant, variants });
-        const extracts = await Promise.all(
-          runs.map(async (run) => {
-            if (!run.calleeConversationId) return { asrTimes: [], perNode: {} };
-            const raw = await fetchConversationWithMetrics(api, calleeAgent.accountId, run.calleeConversationId);
-            return extractMetricsFromConversation(raw || {});
-          }),
-        );
-        const merged = mergeExtracts(extracts);
+          if (onProgress) onProgress({ phase: "collecting", variant, variants: runnableVariants });
+          const extracts = await Promise.all(
+            runs.map(async (run) => {
+              if (!run.calleeConversationId) return { asrTimes: [], perNode: {} };
+              const raw = await fetchConversationWithMetrics(api, calleeAgent.accountId, run.calleeConversationId);
+              return extractMetricsFromConversation(raw || {});
+            }),
+          );
+          const merged = mergeExtracts(extracts);
 
-        variantResults.push({
-          variantId: variant.id,
-          ttsModelId: variant.ttsModelId,
-          llm: variant.llm,
-          label: variant.label || "default",
-          asr: computeMinMaxAvg(merged.asrTimes),
-          perNode: summarizeNodeStats(merged.perNode),
-          scenarioRuns: runs.map((r) => ({
-            scenarioId: r.scenario.id,
-            scenarioName: r.scenario.name,
-            callerConversationId: r.callerConversationId,
-            calleeConversationId: r.calleeConversationId,
-            endReason: r.endReason,
-          })),
-        });
+          variantResults.push({
+            variantId: variant.id,
+            ttsModelId: variant.ttsModelId,
+            llm: variant.llm,
+            label: variant.label || "default",
+            asr: computeMinMaxAvg(merged.asrTimes),
+            perNode: summarizeNodeStats(merged.perNode),
+            conversationStats: summarizeConversationStats(merged),
+            scenarioRuns: runs.map((r) => ({
+              scenarioId: r.scenario.id,
+              scenarioName: r.scenario.name,
+              callerConversationId: r.callerConversationId,
+              calleeConversationId: r.calleeConversationId,
+              endReason: r.endReason,
+            })),
+          });
+        } catch (err) {
+          failedVariants.push({ variantId: variant.id, label: variant.label, error: err.message });
+        }
+        if (onVariantDone) {
+          try {
+            await onVariantDone({ variants: [...variantResults], failedVariants: [...failedVariants], invalidLlms, nodeNames });
+          } catch (err) {
+            // Best-effort, same as the debugLogs.save above -- an incremental-persistence failure
+            // must never abort the sweep itself, the run's actual results matter more.
+            console.error("onVariantDone callback failed (benchmark continues)", err);
+          }
+        }
       }
     } finally {
-      if (onProgress) onProgress({ phase: "restoring", variants });
+      if (onProgress) onProgress({ phase: "restoring", variants: runnableVariants });
       await api.agents.setModelConfig(calleeAgent.accountId, calleeAgent.agentId, snapshot);
       // Only clear the pending-restore record once the restore above has actually succeeded (if
       // setModelConfig throws, this line never runs, and the record correctly survives for later
@@ -381,7 +532,7 @@
       await api.agents.clearPendingRestore(calleeAgent.accountId, calleeAgent.agentId);
     }
 
-    return { snapshot, variants: variantResults, nodeNames };
+    return { snapshot, variants: variantResults, nodeNames, invalidLlms, failedVariants };
   }
 
   /**
@@ -404,7 +555,7 @@
           }),
         );
         const merged = mergeExtracts(extracts);
-        return { ...variant, asr: computeMinMaxAvg(merged.asrTimes), perNode: summarizeNodeStats(merged.perNode) };
+        return { ...variant, asr: computeMinMaxAvg(merged.asrTimes), perNode: summarizeNodeStats(merged.perNode), conversationStats: summarizeConversationStats(merged) };
       }),
     );
   }
@@ -424,6 +575,7 @@
     extractMetricsFromConversation,
     mergeExtracts,
     summarizeNodeStats,
+    summarizeConversationStats,
     // Exported for session/RecommendationTest.js, which runs a preset's scenarios once in
     // text-only mode the same way a benchmark variant does, just without the TTS/LLM sweep around
     // it.

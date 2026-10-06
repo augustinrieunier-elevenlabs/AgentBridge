@@ -17,7 +17,7 @@
  * exists to recommend from.
  */
 (function () {
-  const { StatCell, CollapsibleCard, nodeLabel, nodeTitle } = window.AB.ui.benchmarkViews;
+  const { StatCell, CollapsibleCard, nodeLabel, nodeTitle, formatDuration, formatCount, formatTokens, ModelEfficiencyScatter } = window.AB.ui.benchmarkViews;
 
   function formatRate(rate) {
     return rate == null ? "n/a" : `${Math.round(rate * 100)}%`;
@@ -31,8 +31,14 @@
   /** `coverageLabel` names what "coverage" means in THIS table's context -- "workflow coverage"
    * (fraction of every node this result ever saw, same denominator as NodeCoverageMatrix's Total
    * row) for the TTS/LLM tables, vs. "node reach" (fraction of this LLM's own runs that got to THIS
-   * one node) for the per-node table -- so the breakdown line is honest about which one it is. */
-  function RankingTable({ rows, idLabel, coverageLabel }) {
+   * one node) for the per-node table -- so the breakdown line is honest about which one it is.
+   *
+   * `showConversationStats` adds Turns/Duration/Tokens columns -- only meaningful for the LLM
+   * ranking (confirmed with the user 2026-10-06): a model needing more back-and-forth or more
+   * tokens to get through the same scenario, or simply being more verbose, is a real efficiency
+   * signal independent of raw latency. Not shown for TTS (which doesn't affect any of the three) or
+   * the per-node table (these three are whole-conversation figures, not meaningful per node). */
+  function RankingTable({ rows, idLabel, coverageLabel, showConversationStats = false }) {
     const { useState } = React;
     const [expanded, setExpanded] = useState(false);
     const visibleRows = expanded ? rows : rows.slice(0, TOP_N);
@@ -47,6 +53,13 @@
               <th>{idLabel}</th>
               <th>Reliability</th>
               <th>Latency (avg / min–max)</th>
+              {showConversationStats && (
+                <>
+                  <th title="Number of 'agent' turns per conversation -- more/less efficient at closing the request, or more/less verbose.">Turns (avg / min–max)</th>
+                  <th>Duration (avg / min–max)</th>
+                  <th title="Total LLM tokens (input + cached + output) actually billed per conversation.">Tokens (avg / min–max)</th>
+                </>
+              )}
               <th>Samples</th>
             </tr>
           </thead>
@@ -65,6 +78,19 @@
                 <td>
                   <StatCell stat={r.latency} />
                 </td>
+                {showConversationStats && (
+                  <>
+                    <td>
+                      <StatCell stat={r.conversationStats && r.conversationStats.turnCount} format={formatCount} />
+                    </td>
+                    <td>
+                      <StatCell stat={r.conversationStats && r.conversationStats.durationSecs} format={formatDuration} />
+                    </td>
+                    <td>
+                      <StatCell stat={r.conversationStats && r.conversationStats.totalTokens} format={formatTokens} />
+                    </td>
+                  </>
+                )}
                 <td className="muted small">
                   {r.sampleCount} run{r.sampleCount === 1 ? "" : "s"}
                 </td>
@@ -130,9 +156,11 @@
           {recs.llmRanking.length === 0 ? (
             <p className="panel-help">No LLM variation found in this agent's history.</p>
           ) : (
-            <RankingTable rows={recs.llmRanking} idLabel="LLM" coverageLabel="workflow coverage" />
+            <RankingTable rows={recs.llmRanking} idLabel="LLM" coverageLabel="workflow coverage" showConversationStats />
           )}
         </CollapsibleCard>
+
+        <ModelEfficiencyScatter candidates={recs.llmRanking} />
 
         <CollapsibleCard title="Per-node LLM pick -- best LLM for each workflow node" defaultOpen={mixedModelWorthwhile}>
           <p className="panel-help">

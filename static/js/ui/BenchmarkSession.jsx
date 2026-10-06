@@ -6,7 +6,7 @@
  */
 (function () {
   const { useEffect, useRef, useState } = React;
-  const { GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart, ResultsTables } = window.AB.ui.benchmarkViews;
+  const { GlobalStatsTable, NodeCoverageMatrix, StackedLatencyChart, ResultsTables, ModelEfficiencyScatter } = window.AB.ui.benchmarkViews;
 
   function BenchmarkSession({ config, accounts, benchmark }) {
     const callerAgent = config.agents.find((a) => a.id === benchmark.callerAgentRefId) || null;
@@ -26,7 +26,10 @@
     const [selectedPastRunId, setSelectedPastRunId] = useState(null);
     const [refreshingRunId, setRefreshingRunId] = useState(null);
     const [textOnly, setTextOnly] = useState(false);
+    const [runsPerScenario, setRunsPerScenario] = useState(1);
     const [deadlockCount, setDeadlockCount] = useState(0);
+    const [invalidLlms, setInvalidLlms] = useState([]); // [{llm, error}] -- rejected by the agent before any call was dialed
+    const [failedVariants, setFailedVariants] = useState([]); // [{variantId, label, error}] -- failed mid-sweep, after validation passed
     const [pendingRestore, setPendingRestore] = useState(null);
     const [restoring, setRestoring] = useState(false);
     const [nodeNames, setNodeNames] = useState({});
@@ -38,6 +41,14 @@
     // React state: a benchmark runs every selected scenario in parallel per variant and moves on to
     // a fresh batch of bridges per variant, so there's nothing here worth re-rendering on.
     const mutedRef = useRef(false);
+    // Cleared at the start of every variant (see the onProgress wrapper in launch()), not just once
+    // for the whole run -- every bridge referenced here is kept alive in memory (WebSocket, debug
+    // log, metrics log) for as long as this ref holds it, and by the time a new variant starts
+    // applying, every bridge from the PREVIOUS variant has already ended (runBenchmark awaits the
+    // whole batch before moving on). Left unbounded before this fix, a multi-variant benchmark
+    // retained every bridge it ever created for the entire run -- worse the more variants and the
+    // higher "Run" (runsPerScenario) were set, since each adds a full extra batch of bridges that
+    // never got released until the whole benchmark finished.
     const liveBridgesRef = useRef([]);
 
     function toggleMuted() {
@@ -104,7 +115,21 @@
 
     const incomplete = !callerAgent || !calleeAgent || scenarios.length === 0 || variants.length === 0;
 
-    async function launch() {
+    function dedupeLlmErrors(list) {
+      const byLlm = new Map();
+      for (const e of list) byLlm.set(e.llm, e);
+      return [...byLlm.values()];
+    }
+
+    /** `resumeRun`, when given (the "Continue" button on an interrupted past run below), reuses its
+     * id and skips every variant it already has instead of starting over -- a variant already
+     * collected isn't re-validated, re-applied or re-dialed (real calls that already cost real
+     * credits). Every variant this attempt DOES run is persisted to that same run record the moment
+     * it finishes (BenchmarkRunner.js's onVariantDone), not just once at the very end -- so a crash
+     * or interruption partway through loses at most the one variant in flight, never everything
+     * collected before it (2026-10-06 incident: one unsupported LLM aborted the whole sweep and
+     * discarded every variant that had already succeeded). */
+    async function launch(resumeRun) {
       if (incomplete) {
         alert("This benchmark needs a caller agent, a callee agent, at least one scenario and at least one TTS/LLM variant -- check Settings → Benchmarks.");
         return;
@@ -119,7 +144,39 @@
       setSelectedPastRunId(null);
       setDeadlockCount(0);
       liveBridgesRef.current = [];
+
+      const priorVariants = (resumeRun && resumeRun.variants) || [];
+      const priorFailed = (resumeRun && resumeRun.failedVariants) || [];
+      const priorInvalid = (resumeRun && resumeRun.invalidLlms) || [];
+      const skipVariantIds = priorVariants.map((v) => v.variantId);
+      setInvalidLlms(priorInvalid);
+      setFailedVariants(priorFailed);
+
       try {
+        let runId;
+        if (resumeRun) {
+          runId = resumeRun.id;
+        } else {
+          // Created empty, right away -- before any call is dialed -- purely so there's a backend
+          // record for onVariantDone to patch incrementally. Not shown as "the" result yet (setResult
+          // still only happens once the whole attempt finishes), but it does show up in the Runs
+          // list below immediately, marked "incomplete", which is exactly right while it's running.
+          const placeholder = await window.AB.api.benchmarkRuns.save({
+            benchmarkId: benchmark.id,
+            benchmarkName: benchmark.name,
+            calleeAgentLabel: calleeAgent.label,
+            calleeAccountId: calleeAgent.accountId,
+            calleeAgentId: calleeAgent.agentId,
+            textOnly: effectiveTextOnly,
+            variants: [],
+            failedVariants: [],
+            invalidLlms: [],
+            incomplete: true,
+          });
+          runId = placeholder.id;
+          setPastRuns((prev) => [placeholder, ...prev]);
+        }
+
         const outcome = await window.AB.session.BenchmarkRunner.runBenchmark({
           api: window.AB.api,
           accounts,
@@ -128,36 +185,72 @@
           scenarios,
           resolveCalleeDynamicVariables,
           benchmark,
-          onProgress: setProgress,
+          onProgress: (p) => {
+            // "applying" fires right before the NEXT variant's config is pushed live, i.e. strictly
+            // after every bridge from the variant that just finished has already ended -- the safe
+            // moment to drop them and let GC reclaim their sockets/logs instead of holding the whole
+            // run's worth of bridges in memory (see liveBridgesRef's own comment).
+            if (p.phase === "applying") liveBridgesRef.current = [];
+            setProgress(p);
+          },
           textOnly: effectiveTextOnly,
           noiseProfile, // Bridge.js itself no-ops this in text-only mode, no need to gate it here too
           onBridgeCreated: handleBridgeCreated,
           voiceTable: config.settings.voice_table,
+          runsPerScenario,
+          skipVariantIds,
+          onVariantDone: async (p) => {
+            const mergedVariants = [...priorVariants, ...p.variants];
+            const mergedFailed = [...priorFailed, ...p.failedVariants];
+            const mergedInvalid = dedupeLlmErrors([...priorInvalid, ...p.invalidLlms]);
+            setInvalidLlms(mergedInvalid);
+            setFailedVariants(mergedFailed);
+            try {
+              await window.AB.api.benchmarkRuns.update(runId, {
+                variants: mergedVariants,
+                failedVariants: mergedFailed,
+                invalidLlms: mergedInvalid,
+                nodeNames: p.nodeNames,
+              });
+            } catch (err) {
+              console.error("Could not persist incremental benchmark progress", err);
+            }
+          },
         });
+
+        const allVariants = [...priorVariants, ...outcome.variants];
+        const allFailed = [...priorFailed, ...outcome.failedVariants];
+        const allInvalid = dedupeLlmErrors([...priorInvalid, ...outcome.invalidLlms]);
+        setInvalidLlms(allInvalid);
+        setFailedVariants(allFailed);
+
+        if (allVariants.length === 0) {
+          // Every llm passed the up-front validation, but every variant still failed once the
+          // sweep actually reached it -- nothing worth presenting as a result (see the banners
+          // above for why each one failed). The backend record stays "incomplete" (empty) so
+          // "Continue" would just re-attempt the same thing -- fine, since nothing succeeded to lose.
+          setPhase("error");
+          setError(`Every variant failed during the run: ${allFailed.map((f) => `${f.label} (${f.error})`).join("; ")}`);
+          return;
+        }
+
         setPhase("done");
-        const saved = await window.AB.api.benchmarkRuns.save({
-          benchmarkId: benchmark.id,
-          benchmarkName: benchmark.name,
-          calleeAgentLabel: calleeAgent.label,
-          // accountId/agentId, not just the label -- the global Analytics view (History →
-          // Analytics) filters history down to one callee agent and needs a reliable match, not a
-          // label string that could collide or get renamed. A run saved before this existed just
-          // falls back to label matching there.
-          calleeAccountId: calleeAgent.accountId,
-          calleeAgentId: calleeAgent.agentId,
-          textOnly: effectiveTextOnly,
-          snapshot: outcome.snapshot,
-          variants: outcome.variants,
+        const saved = await window.AB.api.benchmarkRuns.update(runId, {
+          variants: allVariants,
           nodeNames: outcome.nodeNames,
+          invalidLlms: allInvalid,
+          failedVariants: allFailed,
+          incomplete: false,
+          finishedAt: Date.now() / 1000, // when the run actually finished, not when the placeholder was first created
         });
         setResult(saved); // same shape as a pastRuns entry (has an id) -- see refreshRun
-        setPastRuns((prev) => [saved, ...prev]);
+        setPastRuns((prev) => [saved, ...prev.filter((r) => r.id !== saved.id)]);
         // A deadlocked scenario (the callee's own workflow stalled mid-turn, not something the
         // bridge can fix) gets auto-ended after ~15s of silence instead of blocking the rest of
         // the benchmark -- see BenchmarkRunner.js runOneScenario's onDeadlock handler. Surfacing it
         // here so a thin-looking result row is understood as "this call got cut short", not a
         // silent data gap.
-        const deadlocked = outcome.variants.flatMap((v) => v.scenarioRuns.filter((r) => r.endReason === "deadlock_timeout"));
+        const deadlocked = allVariants.flatMap((v) => v.scenarioRuns.filter((r) => r.endReason === "deadlock_timeout"));
         if (deadlocked.length > 0) {
           setDeadlockCount(deadlocked.length);
         }
@@ -234,6 +327,7 @@
         <div className="session-toolbar">
           <span>
             Benchmark "{benchmark.name}" -- {variants.length} configuration{variants.length === 1 ? "" : "s"} × {scenarios.length} scenario{scenarios.length === 1 ? "" : "s"}
+            {runsPerScenario > 1 ? ` × ${runsPerScenario} run${runsPerScenario === 1 ? "" : "s"} each` : ""}
           </span>
           <label
             className="checkbox-row"
@@ -254,7 +348,20 @@
           >
             {muted ? "Unmute" : "Mute"}
           </button>
-          <button className="primary" onClick={launch} disabled={phase === "running"}>
+          <label
+            className="checkbox-row"
+            title="Replays each selected scenario this many times within the same variant, all in parallel, before moving on to the next variant -- more samples per node instead of one call deciding the whole thing."
+          >
+            Run
+            <select value={runsPerScenario} onChange={(e) => setRunsPerScenario(Number(e.target.value))} disabled={phase === "running"}>
+              {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="primary" onClick={() => launch()} disabled={phase === "running"}>
             {phase === "running" ? "Running…" : "Run benchmark"}
           </button>
         </div>
@@ -265,16 +372,42 @@
 
         {phase === "running" && (
           <div className="banner banner-warn">
-            Running {effectiveTextOnly ? "text only" : "with real audio"} -- each variant dials every selected scenario, one pass each, then moves to the next.{" "}
+            Running {effectiveTextOnly ? "text only" : "with real audio"} -- each variant dials every selected scenario{runsPerScenario > 1 ? `, ${runsPerScenario}× each,` : ""} then moves to the next.{" "}
             {progress && (
               <>
+                {progress.phase === "validating" && "Checking every selected LLM against this agent before dialing any calls…"}
                 {progress.phase === "applying" && `Applying variant "${progress.variant.label}"…`}
-                {progress.phase === "running" && `Running ${scenarios.length} scenario(s) against "${progress.variant.label}"…`}
+                {progress.phase === "running" &&
+                  `Running ${scenarios.length} scenario(s)${runsPerScenario > 1 ? ` (${runsPerScenario}× each)` : ""} against "${progress.variant.label}"…`}
                 {progress.phase === "collecting" && `Collecting results for "${progress.variant.label}"…`}
                 {progress.phase === "restoring" && "Restoring the callee's original configuration…"}
                 {progress.variant && ` (variant ${variants.findIndex((v) => v.id === progress.variant.id) + 1}/${variants.length})`}
               </>
             )}
+          </div>
+        )}
+
+        {invalidLlms.length > 0 && (
+          <div className="banner banner-warn">
+            Skipped {invalidLlms.length} LLM{invalidLlms.length === 1 ? "" : "s"} rejected by this agent before any call was dialed:{" "}
+            {invalidLlms.map((e, i) => (
+              <span key={e.llm}>
+                {i > 0 ? "; " : ""}
+                <strong>{e.llm}</strong> ({e.error})
+              </span>
+            ))}
+          </div>
+        )}
+
+        {failedVariants.length > 0 && (
+          <div className="banner banner-warn">
+            {failedVariants.length} variant{failedVariants.length === 1 ? "" : "s"} failed mid-run and {failedVariants.length === 1 ? "was" : "were"} skipped (every other variant's results are still kept):{" "}
+            {failedVariants.map((f, i) => (
+              <span key={f.variantId}>
+                {i > 0 ? "; " : ""}
+                <strong>{f.label}</strong> ({f.error})
+              </span>
+            ))}
           </div>
         )}
 
@@ -308,8 +441,22 @@
                 <li key={r.id} className="card-row">
                   <button className={`list-item-btn${selectedPastRunId === r.id ? " list-item-active" : ""}`} onClick={() => setSelectedPastRunId(r.id)}>
                     {new Date((r.finishedAt || 0) * 1000).toLocaleString()} -- {r.variants.length} variant{r.variants.length === 1 ? "" : "s"}
+                    {r.incomplete && <span className="badge badge-warn"> incomplete</span>}
                   </button>
-                  <button onClick={() => refreshRun(r)} disabled={refreshingRunId === r.id}>
+                  {r.incomplete && (
+                    <button
+                      onClick={() => launch(r)}
+                      disabled={phase === "running"}
+                      title="Picks up where this run stopped -- already-completed variants are kept as-is, not re-dialed."
+                    >
+                      Continue
+                    </button>
+                  )}
+                  <button
+                    onClick={() => refreshRun(r)}
+                    disabled={refreshingRunId === r.id || phase === "running"}
+                    title={phase === "running" ? "Not available while a run is in progress -- this run's own local copy here could be stale and overwrite what's actually been saved." : undefined}
+                  >
                     {refreshingRunId === r.id ? "Refreshing…" : "Refresh stats"}
                   </button>
                 </li>
@@ -325,6 +472,11 @@
             <GlobalStatsTable result={shownResult} />
             <NodeCoverageMatrix result={shownResult} nodeNames={nodeNames} />
             <StackedLatencyChart result={shownResult} />
+            {/* computeRecommendations works on ANY {variants} result, not just the harmonized
+                cross-feature one (see GlobalAnalytics.js) -- here it's scoped to just THIS
+                benchmark's own variants, so reliability/turns/duration/tokens reflect only this
+                run's history, not the agent's full history. */}
+            <ModelEfficiencyScatter candidates={window.AB.session.GlobalAnalytics.computeRecommendations(shownResult).llmRanking} />
             <ResultsTables result={shownResult} nodeNames={nodeNames} />
           </>
         )}

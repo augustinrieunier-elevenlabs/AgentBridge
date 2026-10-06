@@ -14,6 +14,28 @@
     return valueSec == null ? "—" : `${Math.round(valueSec * 1000)} ms`;
   }
 
+  /** Call duration in seconds -> "37s" / "1m 15s" -- distinct from formatMs (which treats its input
+   * as sub-second latency) since a whole conversation's duration is always several seconds at
+   * least, where "37000 ms" would read far worse than "37s". */
+  function formatDuration(valueSec) {
+    if (valueSec == null) return "—";
+    const total = Math.round(valueSec);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  /** A plain count (turns) -- one decimal place so an average like "4.3 turns" stays meaningful,
+   * while min/max (always whole turns) round cleanly back down to integers. */
+  function formatCount(value) {
+    return value == null ? "—" : (Math.round(value * 10) / 10).toString();
+  }
+
+  /** Token counts: thousands separator, no decimals -- a fractional token average reads as noise. */
+  function formatTokens(value) {
+    return value == null ? "—" : Math.round(value).toLocaleString();
+  }
+
   // `nodeNames` (workflow node id -> {label, type}) is optional everywhere it's passed -- older
   // runs/exports predating this lookup, or a run whose live resolution hasn't landed yet, simply
   // fall back to the raw id (exactly what every node looked like before this existed), never a
@@ -75,11 +97,11 @@
 
   /** Simple stat cell for a value that's always expected to exist (e.g. the global ASR row, where
    * every variant always has caller turns) -- no "was this even reached" ambiguity to resolve. */
-  function StatCell({ stat }) {
+  function StatCell({ stat, format = formatMs }) {
     if (!stat) return <span className="muted small">n/a</span>;
     return (
       <span title={`${stat.n} sample${stat.n === 1 ? "" : "s"}`}>
-        {formatMs(stat.avg)} <span className="muted small">({formatMs(stat.min)}–{formatMs(stat.max)})</span>
+        {format(stat.avg)} <span className="muted small">({format(stat.min)}–{format(stat.max)})</span>
       </span>
     );
   }
@@ -128,6 +150,13 @@
               {showAsr && <th>ASR (avg / min–max)</th>}
               <th>LLM (avg / min–max)</th>
               <th>TTS (avg / min–max)</th>
+              <th title="Number of 'agent' turns per conversation -- a model that needs more back-and-forth to get through the same scenario, or is simply more verbose, shows up here.">
+                Turns (avg / min–max)
+              </th>
+              <th>Duration (avg / min–max)</th>
+              <th title="Total LLM tokens (input + cached + output) actually billed for the whole conversation -- a rough cost/efficiency indicator, independent of raw latency.">
+                Tokens (avg / min–max)
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -144,6 +173,15 @@
                 </td>
                 <td>
                   <StatCell stat={combineNodeStats(v.perNode, "tts")} />
+                </td>
+                <td>
+                  <StatCell stat={v.conversationStats && v.conversationStats.turnCount} format={formatCount} />
+                </td>
+                <td>
+                  <StatCell stat={v.conversationStats && v.conversationStats.durationSecs} format={formatDuration} />
+                </td>
+                <td>
+                  <StatCell stat={v.conversationStats && v.conversationStats.totalTokens} format={formatTokens} />
                 </td>
               </tr>
             ))}
@@ -516,14 +554,210 @@
     );
   }
 
+  // Plot geometry. The viewBox is large (and the chart renders at up to SCATTER_MAX_WIDTH, not a
+  // small fixed box) because a real agent's history can carry dozens of LLM candidates (seen
+  // 2026-10-06: ~39 on one agent) -- a small canvas crowds that many bubbles into illegibility
+  // regardless of anything else. Height is a fraction of the rendered width (not fixed), via
+  // `aspect-ratio` in CSS, so it scales down gracefully on a narrower screen too.
+  const SCATTER_WIDTH = 1000;
+  const SCATTER_HEIGHT = 580;
+  const SCATTER_PAD = { top: 20, right: 24, bottom: 48, left: 64 };
+  // Bubble radius spec (marks-and-anatomy.md): >= 8px marker floor. Kept modest at the top end
+  // (vs. a smaller-candidate-count chart) specifically BECAUSE there can be dozens of points on
+  // screen at once -- a larger max would make overlap worse, not clearer, at that density.
+  const SCATTER_R_MIN = 9;
+  const SCATTER_R_MAX = 26;
+  const SCATTER_AXIS_TICKS = [0.25, 0.5, 0.75, 1];
+
+  /**
+   * One point per model (LLM candidate), positioning "how it behaves" (turns, duration) against
+   * "how it performed" (reliability, as color) and "how much it cost" (tokens, as size) all at
+   * once -- the four-variable comparison the per-model table above can't show in one glance.
+   *
+   * Color is the SAME green -> amber -> red reliability gradient used everywhere else in this app
+   * (coverageColor, see NodeCoverageMatrix's Total row / StackedLatencyChart's LLM segment) -- a
+   * reliability score is exactly a "good -> critical" status metric (dataviz skill's color-formula:
+   * "when a series means good/bad ... it wears status tokens"), so this reuses that established
+   * scale rather than inventing a new one, confirmed with the user 2026-10-06 ("la couleur ...
+   * doit être alignée avec le résultat des tests").
+   *
+   * Radius encodes avg tokens via sqrt scaling (not linear) so the bubble's AREA -- what the eye
+   * actually compares -- is proportional to the token count, not its radius.
+   *
+   * No always-on per-point label: with a real agent's history carrying dozens of candidates, static
+   * labels on every bubble collide into unreadable text soup (confirmed with the user 2026-10-06,
+   * who hit exactly this on real data). Identity instead comes from a real hover/focus tooltip
+   * (dataviz skill's interaction.md: "each dot ... carries its own pointermove/focus tooltip ...
+   * the hovered mark lifts") -- every value it shows is also a plain column in RankingTable above,
+   * so nothing here is only reachable by hovering.
+   */
+  function ModelEfficiencyScatter({ candidates, title = "Model efficiency -- turns × duration × tokens, colored by reliability" }) {
+    const { useState, useRef } = React;
+    const containerRef = useRef(null);
+    const [hovered, setHovered] = useState(null); // { point, left, top } in container-relative px
+
+    const points = (candidates || [])
+      .map((c) => {
+        const stats = c.conversationStats || {};
+        const x = stats.turnCount && stats.turnCount.avg;
+        const y = stats.durationSecs && stats.durationSecs.avg;
+        if (x == null || y == null) return null;
+        const tokens = stats.totalTokens && stats.totalTokens.avg;
+        return { id: c.id, x, y, tokens, reliability: c.reliability, hangupRate: c.hangupRate, coverage: c.coverage, sampleCount: c.sampleCount };
+      })
+      .filter(Boolean);
+
+    function showTooltip(e, point) {
+      const rect = containerRef.current.getBoundingClientRect();
+      setHovered({ point, left: e.clientX - rect.left + 16, top: e.clientY - rect.top + 16 });
+    }
+
+    return (
+      <CollapsibleCard title={title}>
+        {points.length === 0 ? (
+          <p className="panel-help">No model has both a turn-count and a duration figure yet -- run (or "Refresh stats" on) a benchmark that measures LLM variants to populate this.</p>
+        ) : (
+          <>
+            <p className="panel-help">
+              Each point is one model -- hover (or focus with Tab) a bubble for its name and exact figures. Position shows how it talks (fewer/more turns, shorter/longer calls); size shows average
+              tokens spent per call; color shows reliability (hangup rate × workflow coverage) -- the same gradient as the Node coverage table above.
+            </p>
+            {(() => {
+              const xs = points.map((p) => p.x);
+              const ys = points.map((p) => p.y);
+              const tokenValues = points.map((p) => p.tokens).filter((v) => v != null);
+              const xMax = Math.max(1, ...xs) * 1.2;
+              const yMax = Math.max(1, ...ys) * 1.2;
+              const maxTokens = Math.max(1, ...tokenValues);
+              const plotW = SCATTER_WIDTH - SCATTER_PAD.left - SCATTER_PAD.right;
+              const plotH = SCATTER_HEIGHT - SCATTER_PAD.top - SCATTER_PAD.bottom;
+
+              const px = (x) => SCATTER_PAD.left + (x / xMax) * plotW;
+              const py = (y) => SCATTER_PAD.top + plotH - (y / yMax) * plotH;
+              const radiusFor = (tokens) => {
+                if (tokens == null) return (SCATTER_R_MIN + SCATTER_R_MAX) / 2;
+                const frac = Math.sqrt(tokens / maxTokens);
+                return SCATTER_R_MIN + frac * (SCATTER_R_MAX - SCATTER_R_MIN);
+              };
+
+              return (
+                <>
+                  <div className="scatter-chart-wrap" ref={containerRef}>
+                    <div className="scatter-chart-aspect">
+                    <svg viewBox={`0 0 ${SCATTER_WIDTH} ${SCATTER_HEIGHT}`} className="scatter-chart" role="img" aria-label={title}>
+                      {/* Gridlines -- hairline, recessive, same one-step-off-surface treatment as every other chart here. */}
+                      {SCATTER_AXIS_TICKS.map((f) => (
+                        <line key={`vgrid-${f}`} x1={px(f * xMax)} y1={SCATTER_PAD.top} x2={px(f * xMax)} y2={SCATTER_PAD.top + plotH} className="scatter-gridline" />
+                      ))}
+                      {SCATTER_AXIS_TICKS.map((f) => (
+                        <line key={`hgrid-${f}`} x1={SCATTER_PAD.left} y1={py(f * yMax)} x2={SCATTER_PAD.left + plotW} y2={py(f * yMax)} className="scatter-gridline" />
+                      ))}
+                      {/* Axes */}
+                      <line x1={SCATTER_PAD.left} y1={SCATTER_PAD.top} x2={SCATTER_PAD.left} y2={SCATTER_PAD.top + plotH} className="scatter-axis" />
+                      <line x1={SCATTER_PAD.left} y1={SCATTER_PAD.top + plotH} x2={SCATTER_PAD.left + plotW} y2={SCATTER_PAD.top + plotH} className="scatter-axis" />
+                      {/* Axis tick labels */}
+                      {SCATTER_AXIS_TICKS.map((f) => (
+                        <text key={`vlabel-${f}`} x={px(f * xMax)} y={SCATTER_PAD.top + plotH + 16} className="scatter-tick-label" textAnchor="middle">
+                          {formatCount(f * xMax)}
+                        </text>
+                      ))}
+                      {SCATTER_AXIS_TICKS.map((f) => (
+                        <text key={`hlabel-${f}`} x={SCATTER_PAD.left - 8} y={py(f * yMax) + 4} className="scatter-tick-label" textAnchor="end">
+                          {formatDuration(f * yMax)}
+                        </text>
+                      ))}
+                      {/* Axis titles */}
+                      <text x={SCATTER_PAD.left + plotW / 2} y={SCATTER_HEIGHT - 8} className="scatter-axis-title" textAnchor="middle">
+                        Avg turns per conversation →
+                      </text>
+                      <text x={14} y={SCATTER_PAD.top + plotH / 2} className="scatter-axis-title" textAnchor="middle" transform={`rotate(-90 14 ${SCATTER_PAD.top + plotH / 2})`}>
+                        Avg duration →
+                      </text>
+                      {/* Points -- hit area wider than the painted bubble (interaction.md: never only the painted pixels); the hovered bubble "lifts" (bigger radius, brighter ring) so it's clear which one the tooltip describes. */}
+                      {points.map((p) => {
+                        const cx = px(p.x);
+                        const cy = py(p.y);
+                        const r = radiusFor(p.tokens);
+                        const color = coverageColor(p.reliability == null ? 0 : p.reliability);
+                        const isHovered = hovered && hovered.point.id === p.id;
+                        return (
+                          <g key={p.id}>
+                            <circle
+                              cx={cx}
+                              cy={cy}
+                              r={r + 14}
+                              fill="transparent"
+                              tabIndex={0}
+                              onMouseEnter={(e) => showTooltip(e, p)}
+                              onMouseMove={(e) => showTooltip(e, p)}
+                              onMouseLeave={() => setHovered(null)}
+                              onFocus={(e) => showTooltip(e, p)}
+                              onBlur={() => setHovered(null)}
+                              className="scatter-point-hit"
+                            />
+                            <circle
+                              cx={cx}
+                              cy={cy}
+                              r={isHovered ? r + 3 : r}
+                              fill={color}
+                              stroke="var(--panel)"
+                              strokeWidth={isHovered ? 3 : 2}
+                              className="scatter-point-bubble"
+                              style={{ pointerEvents: "none" }}
+                            />
+                          </g>
+                        );
+                      })}
+                    </svg>
+                    </div>
+                    {hovered && (
+                      <div className="scatter-tooltip" style={{ left: hovered.left, top: hovered.top }}>
+                        <strong>{hovered.point.id}</strong>
+                        <div>
+                          {formatCount(hovered.point.x)} turns · {formatDuration(hovered.point.y)} · {hovered.point.tokens == null ? "n/a" : formatTokens(hovered.point.tokens)} tokens
+                        </div>
+                        <div className="muted small">
+                          reliability {hovered.point.reliability == null ? "n/a" : `${Math.round(hovered.point.reliability * 100)}%`} (hangup{" "}
+                          {hovered.point.hangupRate == null ? "n/a" : `${Math.round(hovered.point.hangupRate * 100)}%`}, coverage{" "}
+                          {hovered.point.coverage == null ? "n/a" : `${Math.round(hovered.point.coverage * 100)}%`}), {hovered.point.sampleCount} run{hovered.point.sampleCount === 1 ? "" : "s"}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="stacked-chart-legend">
+                    <span className="stacked-chart-legend-item">
+                      <span className="stacked-chart-swatch" style={{ background: `linear-gradient(90deg, rgb(${FAIL_RGB.join(", ")}), rgb(${WARN_RGB.join(", ")}), rgb(${OK_RGB.join(", ")}))` }} />
+                      Color: reliability (red = less reliable, green = more reliable)
+                    </span>
+                    <span className="stacked-chart-legend-item">
+                      <svg width="56" height="28" className="scatter-legend-bubbles" aria-hidden="true">
+                        <circle cx={16} cy={18} r={SCATTER_R_MIN / 1.6} fill="var(--muted)" />
+                        <circle cx={42} cy={14} r={SCATTER_R_MAX / 1.6} fill="var(--muted)" />
+                      </svg>
+                      Size: avg tokens per call (bigger = more tokens)
+                    </span>
+                  </div>
+                </>
+              );
+            })()}
+          </>
+        )}
+      </CollapsibleCard>
+    );
+  }
+
   window.AB.ui.benchmarkViews = {
     formatMs,
+    formatDuration,
+    formatCount,
+    formatTokens,
     StatCell,
     NodeStatCell,
     GlobalStatsTable,
     NodeCoverageMatrix,
     StackedLatencyChart,
     ResultsTables,
+    ModelEfficiencyScatter,
     CollapsibleCard,
     nodeLabel,
     nodeTitle,

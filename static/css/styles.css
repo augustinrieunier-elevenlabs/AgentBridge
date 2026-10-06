@@ -401,6 +401,85 @@ label.grow {
   padding-top: 4px;
 }
 
+/* ---- ModelEfficiencyScatter (ui/BenchmarkAnalyticsViews.jsx) ---- */
+
+.scatter-chart-wrap {
+  position: relative;
+  /* Explicit width (not just max-width) -- this sits inside a few different layout contexts
+     (AnalyticsPanel's global view, BenchmarkSession's per-run view), and relying on flex/grid
+     stretch alone to give a block element its width left it shrink-wrapping to near-nothing in at
+     least one of them (seen 2026-10-06: rendered ~260px wide instead of filling the card). Explicit
+     width: 100% removes that ambiguity regardless of the parent's layout mode. */
+  width: 100%;
+  /* Capped well under the card's full width -- SCATTER_WIDTH/HEIGHT (1000/580) is sized for dozens
+     of candidates without overlap, but stretched edge-to-edge in a wide card it reads as oversized
+     for the typical handful-to-dozen case. This is the only number to tune for "bigger/smaller". */
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+/* Responsive aspect-ratio box via the padding-bottom trick (580/1000 = 58%), not the `aspect-ratio`
+   CSS property -- deliberately avoided here: combined with a percentage width on a replaced element
+   (<svg>) inside a shrink-ambiguous parent, it was part of what produced the undersized render
+   above. This technique has no such edge case: the padding sets the height unconditionally off the
+   now-explicit 100% width, nothing for the browser to resolve circularly. */
+.scatter-chart-aspect {
+  position: relative;
+  width: 100%;
+  height: 0;
+  padding-bottom: 58%;
+}
+
+.scatter-chart {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.scatter-gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.scatter-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.scatter-tick-label,
+.scatter-axis-title {
+  fill: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-body);
+}
+
+.scatter-point-hit {
+  cursor: pointer;
+}
+
+.scatter-point-bubble {
+  transition: r 0.08s ease-out, stroke-width 0.08s ease-out;
+}
+
+.scatter-tooltip {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 8px 12px;
+  font-size: 12px;
+  max-width: 320px;
+}
+
+.scatter-legend-bubbles circle {
+  opacity: 0.6;
+}
+
 .scenario-override {
   margin: 4px 0 10px 26px;
   padding-left: 12px;
